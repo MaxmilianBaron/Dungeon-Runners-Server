@@ -73,6 +73,7 @@ namespace DungeonRunners.Networking
                             _scheduledSummonInputEntities.Remove(summonEntityId);
                             Combat.CombatRuntime.Instance.AdmitSummonInitialization(summonEntityId, simulationTick);
                         }
+                        ApplyPendingHeroStatInput(batch.ConnId, batch.PacketWriterTick, _currentClientActionMessageIndex);
                         ApplyPendingPlayerUseTargetActionInputs(simulationTick);
                         ApplyPendingPlayerUsePositionActionInputs(simulationTick);
                         ApplyPendingSelfCastActionInputs(simulationTick);

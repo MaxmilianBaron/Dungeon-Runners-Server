@@ -226,7 +226,6 @@ namespace DungeonRunners.Combat
             target.FleeActionActive = false;
             target.MoveInDirectionHeadingInit = false;
             target.UnitMoverMovingThisFrame = false;
-            target.ClientVisibleMovingThisFrame = false;
             target.SpeedMod = target.BaseSpeedMod;
             target.UnitFlags = (target.UnitFlags & 0xFFFFE7FFu) | 0x400u;
             target.UnitState31B = 0;

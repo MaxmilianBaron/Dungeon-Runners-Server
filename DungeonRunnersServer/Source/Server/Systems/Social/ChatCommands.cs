@@ -1188,15 +1188,27 @@ namespace DungeonRunners.Networking
                         return true;
                 }
 
-                int rating = 1500;
+                int rating = DungeonRunners.Data.SavedCharacter.DefaultPvpRating;
+                byte ratingFraction = 0;
                 try
                 {
                     var ch = _server.GetSavedCharacterForConn(conn);
-                    if (ch != null && ch.pvpRating > 0) rating = ch.pvpRating;
+                    if (ch == null)
+                    {
+                        sendMessage(conn, "[PVP] Character rating is unavailable.");
+                        return true;
+                    }
+                    ch.GetPvpRatingFixed32();
+                    rating = ch.pvpRating;
+                    ratingFraction = ch.pvpRatingFraction;
                 }
-                catch { }
+                catch
+                {
+                    sendMessage(conn, "[PVP] Character rating is invalid.");
+                    return true;
+                }
 
-                bool ok = Gameplay.PVPMatchmaking.Instance.EnqueuePlayer(conn.LoginName, conn.CharSqlId, atype, rating, "solo:" + conn.LoginName, SimulationClock.SimulationTick);
+                bool ok = Gameplay.PVPMatchmaking.Instance.EnqueuePlayer(conn.LoginName, conn.CharSqlId, atype, rating, "solo:" + conn.LoginName, SimulationClock.SimulationTick, ratingFraction);
                 sendMessage(conn, ok
                     ? $"[PVP] Queued for {atype} (rating {rating}). Need {Gameplay.PVPMatchmaking.MinGroupCount(atype)} teams."
                     : "[PVP] Could not queue (already queued or in match).");

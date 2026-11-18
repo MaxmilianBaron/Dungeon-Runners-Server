@@ -71,5 +71,13 @@ namespace DungeonRunners.Networking
                 records.Add(root.GetRecord());
             ClientEntityRootRecord.WriteSnapshot(writer, records);
         }
+
+        public static void WritePlayerAvatarRoots(LEWriter writer, ClientEntityRootSnapshot avatar, ClientEntityRootSnapshot player)
+        {
+            ClientEntityRootRecord avatarRecord = avatar.GetRecord();
+            ClientEntityRootRecord playerRecord = player.GetRecord();
+            ClientEntityRootRecord.WriteSnapshotInInitializationOrder(writer,
+                new[] { avatarRecord, playerRecord }, new[] { playerRecord, avatarRecord });
+        }
     }
 }

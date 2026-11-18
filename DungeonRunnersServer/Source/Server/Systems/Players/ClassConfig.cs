@@ -291,16 +291,25 @@ namespace DungeonRunners.Data
         public int respecCount = 0;
         public int pvpWins = 0;
         public const int DefaultPvpRating = 1500;
+        public const int MinPvpRating = -8388608;
+        public const int MaxPvpRating = 8388607;
         public int pvpRating = DefaultPvpRating;
+        public byte pvpRatingFraction;
         public bool hasPvpRating = false;
         public byte monsterDifficulty;
         public int minimumItemQuality = 1;
 
         public uint GetPvpRatingFixed32()
         {
-            if (pvpRating < 0 || pvpRating > 3000)
+            if (pvpRating < MinPvpRating || pvpRating > MaxPvpRating)
                 throw new ArgumentOutOfRangeException(nameof(pvpRating));
-            return checked((uint)pvpRating << 8);
+            return unchecked((uint)checked(pvpRating * 256 + pvpRatingFraction));
+        }
+
+        public void SetPvpRatingFixed32(int ratingFixed32)
+        {
+            pvpRating = ratingFixed32 >> 8;
+            pvpRatingFraction = unchecked((byte)ratingFixed32);
         }
 
         public string tpZone = "";
@@ -366,6 +375,7 @@ namespace DungeonRunners.Data
                 respecCount = respecCount,
                 pvpWins = pvpWins,
                 pvpRating = pvpRating,
+                pvpRatingFraction = pvpRatingFraction,
                 hasPvpRating = hasPvpRating,
                 monsterDifficulty = monsterDifficulty,
                 minimumItemQuality = minimumItemQuality,

@@ -476,28 +476,103 @@ public partial class CombatRuntime
                 TickMonsterActiveSkillProjectile(pending, projectileIndex, nowTick);
                 return;
             }
-            if (pending.DueTick > nowTick) return;
-            _pendingMonsterProjectiles.RemoveAt(projectileIndex);
-            RemoveClientSubEntity(ClientSubEntityKind.MonsterProjectile, sequence, pending.InstanceKey);
+            if (unchecked(nowTick - pending.LastUpdateTick) <= 0)
+                return;
+            pending.LastUpdateTick = nowTick;
 
             Monster monster = pending.Monster;
-            CombatTarget target = GetPlayer(pending.TargetEntityId);
-            if (monster == null
-                || monster.EntityId != pending.MonsterEntityId
-                || target == null
-                || !target.IsAlive
-                || !target.HasUnitState
-                || !string.Equals(RoomRuntime.NormalizeInstanceKey(target.InstanceKey), pending.InstanceKey, StringComparison.OrdinalIgnoreCase))
+            if (monster == null || monster.EntityId != pending.MonsterEntityId || pending.UpdatesCompleted >= pending.MaxLifetimeTicks)
             {
-                Debug.LogError($"[MON-PROJECTILE] impact-discard seq={pending.Sequence} monster={pending.MonsterEntityId} target={pending.TargetEntityId} marker={pending.Marker} source={pending.Source} dueTick={pending.DueTick} nowTick={nowTick} reason=actor-invalid");
+                RemoveMonsterProjectileAt(projectileIndex, pending);
                 return;
             }
 
-            Debug.LogError($"[MON-PROJECTILE] {monster.Name}#{monster.EntityId}->{target.Name} impact seq={pending.Sequence} marker={pending.Marker} source={pending.Source} fireTick={pending.FireTick} flightTicks={pending.FlightTicks} dueTick={pending.DueTick} nowTick={nowTick} sourceFunction=Projectile::doImpact@0x00594430");
-            ResolveMonsterAttackDamage(monster, target, pending.DistF32, pending.Marker, $"{pending.Source}-projectile-impact");
+            int previousX = pending.CurrentFixedX;
+            int previousY = pending.CurrentFixedY;
+            int previousZ = pending.CurrentFixedZ;
+            int nextX = previousX + pending.VelocityFixedX;
+            int nextY = previousY + pending.VelocityFixedY;
+            int nextZ = previousZ;
+            pending.UpdatesCompleted++;
+            const int heightLimit = 0x0a00;
+            string mapKey = string.IsNullOrWhiteSpace(pending.InstanceKey) ? pending.ZoneName : pending.InstanceKey;
+            PathMap map = string.IsNullOrWhiteSpace(mapKey) ? null : PathMapCatalog.Instance.GetPathMap(mapKey);
+            if (map != null && map.TryGetHeightAtFixed(nextX, nextY, out int groundZ))
+                nextZ = groundZ + pending.GroundOffsetFixedZ;
+            int heightChange = nextZ - previousZ;
+            if (heightChange > heightLimit || (heightChange >= -heightLimit && pending.UpdatesCompleted == pending.MaxLifetimeTicks))
+            {
+                RemoveMonsterProjectileAt(projectileIndex, pending);
+                return;
+            }
+            if (heightChange < -heightLimit)
+                nextZ = previousZ;
+
+            CombatTarget target = FindMonsterWeaponProjectileTarget(pending, nextX, nextY, nextZ);
+            if (target != null)
+            {
+                RemoveMonsterProjectileAt(projectileIndex, pending);
+                if (ServerDiagnostics.IsEnabled("verboseProjectileLogging"))
+                    Debug.LogError($"[MON-PROJECTILE] seq={pending.Sequence} monster={monster.EntityId} target={target.EntityId} tick={nowTick} positionFixed=({nextX},{nextY},{nextZ}) result=unit-impact");
+                ResolveMonsterAttackDamage(monster, target, pending.DistF32, pending.Marker, $"{pending.Source}-projectile-impact", false);
+                return;
+            }
+
+            WorldCollision collision = WorldCollision.Instance;
+            if (collision.TryGetPointBlockerFixed(pending.ZoneName, pending.InstanceKey, nextX, nextY, nextZ, UnitMover.Fixed, out _)
+                || (collision.TryGetTerrainHeightWithinToleranceFixed(pending.ZoneName, pending.InstanceKey, previousX, previousY, previousZ, heightLimit, out int startTerrainZ, out _)
+                    && collision.TryGetTerrainHeightWithinToleranceFixed(pending.ZoneName, pending.InstanceKey, nextX, nextY, nextZ, heightLimit, out int endTerrainZ, out _)
+                    && (previousZ <= startTerrainZ) != (nextZ <= endTerrainZ)))
+            {
+                RemoveMonsterProjectileAt(projectileIndex, pending);
+                return;
+            }
+
+            pending.CurrentFixedX = nextX;
+            pending.CurrentFixedY = nextY;
+            pending.CurrentFixedZ = nextZ;
         }
 
-        private bool ProcessProximityAggro(uint playerEntityId = 0, Monster onlyMonster = null, bool queueFollowBehaviorInput = true)
+        private CombatTarget FindMonsterWeaponProjectileTarget(PendingMonsterProjectileImpact pending, int nextX, int nextY, int nextZ)
+        {
+            int scanRadius = pending.ProjectileSizeF32 + 0x1e00;
+            long scanRadiusSq = ((long)scanRadius * scanRadius) >> 8;
+            CombatTarget closest = null;
+            long closestDistanceSq = long.MaxValue;
+            foreach (CombatTarget candidate in GetCombatTargetsInEntityOrder())
+            {
+                if (!candidate.HasUnitState || !candidate.IsAlive || candidate.CurrentHPWire == 0
+                    || !string.Equals(RoomRuntime.NormalizeInstanceKey(candidate.InstanceKey), pending.InstanceKey, StringComparison.OrdinalIgnoreCase)
+                    || !IsMonsterEnemyOfTarget(pending.Monster, candidate))
+                    continue;
+
+                ResolveMonsterActionTargetPositionFixed(candidate, out int candidateX, out int candidateY, out int candidateZ);
+                int radius;
+                if (candidate.Monster is Monster candidateMonster)
+                {
+                    if (!IsProjectileUnitHittableMonster(candidateMonster))
+                        continue;
+                    TryPeekMonsterClientVisiblePositionFixed(candidateMonster, 0, out candidateX, out candidateY, out candidateZ);
+                    radius = ResolveProjectileUnitCollisionRadiusF32(candidateMonster);
+                }
+                else
+                    radius = ResolvePlayerUnitBehaviorRadiusF32(candidate.PlayerState);
+
+                long distanceSq = ProjectileFinderDistanceSqFixed8(candidateX, candidateY, candidateZ, nextX, nextY, nextZ);
+                if (distanceSq > scanRadiusSq || distanceSq > closestDistanceSq
+                    || (distanceSq == closestDistanceSq && closest != null && candidate.EntityId >= closest.EntityId))
+                    continue;
+                int hitRadius = WeaponUseRuntime.ProjectileCollisionRadiusF32(radius, pending.ProjectileSizeF32);
+                if (WeaponUseRuntime.TestProjectilePointUnitCollisionFixed(nextX, nextY, candidateX, candidateY, hitRadius, out _))
+                {
+                    closest = candidate;
+                    closestDistanceSq = distanceSq;
+                }
+            }
+            return closest;
+        }
+
+        private bool ProcessProximityAggro(uint playerEntityId = 0, Monster onlyMonster = null)
         {
             if (_players.Count == 0) return false;
             bool acquired = false;
@@ -576,7 +651,7 @@ public partial class CombatRuntime
                     monster.PosFixedX = monsterFixedX;
                     monster.PosFixedY = monsterFixedY;
                     monster.PosFixedZ = monsterFixedZ;
-                    bool monsterAcquired = AggroMonster(monster, nearest, "proximity", false, queueFollowBehaviorInput);
+                    bool monsterAcquired = AggroMonster(monster, nearest, "proximity");
                     if (monsterAcquired)
                     {
                         monster.ProximityTargetScanMatched = clientTargetScanMatched;
@@ -642,6 +717,8 @@ public partial class CombatRuntime
             }
             else if (owner == MONSTER_MOVE_TO_POINT_RETURN)
                 StopMonsterReturnMove(monster);
+            else if (owner == MONSTER_MOVE_TO_POINT_USE_TARGET)
+                ClearMonsterMoveToPointPath(monster, owner);
         }
 
         private bool TryResolveMonsterMoveToPointSteering(
@@ -792,8 +869,7 @@ public partial class CombatRuntime
                 if (ProcessMonsterFleeMovement(monster, emitPositionChanged))
                     continue;
                 bool returnMove = monster.ReturnMoveActive;
-                bool useTargetMove = monster?.Behavior?.UseTargetActive == true
-                    && monster.SelectedActiveSkillTargetEntityId != 0;
+                bool useTargetMove = monster.UnitMoverPathOwner == MONSTER_MOVE_TO_POINT_USE_TARGET;
                 bool followAction = monster?.Behavior?.FollowActive == true;
                 uint movementTargetId = ResolveMonsterActionTargetEntityId(monster);
                 if (!monster.IsAlive || (!returnMove && ((!monster.AggroTriggered && !useTargetMove && !followAction) || movementTargetId == 0))) continue;
@@ -801,13 +877,12 @@ public partial class CombatRuntime
                 monster.UnitMoverMovingThisFrame = false;
                 if (!returnMove && playerEntityId != 0 && movementTargetId != playerEntityId) continue;
                 TryGetCombatTarget(movementTargetId, out var target);
-                if (!returnMove && (target == null
+                if (useTargetMove && !TryGetMonsterUseTarget(monster, out target)) continue;
+                if (!returnMove && !useTargetMove && (target == null
                     || !target.IsAlive
                     || !target.HasUnitState
                     || !MatchesInstance(monster, target.InstanceKey))) continue;
-                if (!returnMove && target.PlayerState.CurrentHPWire == 0 && target.PlayerState.EntitySynchInfoHP == 0) continue;
-                monster.ClientVisibleMovingThisFrameTick = CombatTick;
-                monster.ClientVisibleMovingThisFrame = false;
+                if (!returnMove && target?.PlayerState is { CurrentHPWire: 0, EntitySynchInfoHP: 0 }) continue;
                 if (IsMonsterDamageReactionActive(monster)) continue;
                 bool followMove = monster.Behavior?.FollowMovesTowardTarget == true;
                 bool searchForAttackMove = monster.SearchForAttackMoveActive;
@@ -823,15 +898,13 @@ public partial class CombatRuntime
                     continue;
                 }
 
-                int allowedRangeFixed = useTargetMove
-                    ? ResolveMonsterSkillTargetClearRangeF32(monster, monster.SelectedActiveSkill, target)
-                    : ResolveMonsterEffectiveAttackRangeFixed(monster);
-                bool pointMove = returnMove || searchForAttackMove || followRepositionMove || followFindLineOfSightMove;
-                bool directionMove = moveInDirection && !pointMove && !useTargetMove;
+                int allowedRangeFixed = ResolveMonsterEffectiveAttackRangeFixed(monster);
+                bool pointMove = returnMove || searchForAttackMove || followRepositionMove || followFindLineOfSightMove || useTargetMove;
+                bool directionMove = moveInDirection && !pointMove;
                 if (!pointMove && !directionMove && allowedRangeFixed <= 0) continue;
                 int movementTargetFixedX;
                 int movementTargetFixedY;
-                if (returnMove)
+                if (returnMove || useTargetMove)
                 {
                     movementTargetFixedX = monster.UnitMoverPathTargetFixedX;
                     movementTargetFixedY = monster.UnitMoverPathTargetFixedY;
@@ -861,9 +934,7 @@ public partial class CombatRuntime
                 long bdyFixed = (long)movementTargetFixedY - behaviorMonsterFixedY;
                 int distFixed = UnitMover.IntSqrt(bdxFixed * bdxFixed + bdyFixed * bdyFixed);
                 int contactThresholdFixed = allowedRangeFixed + CLIENT_CONTACT_RANGE_EPSILON_FIXED;
-                bool movementTargetReached = useTargetMove
-                    ? EvaluateMonsterActiveSkillTargetClearFixed(monster, target, allowedRangeFixed)
-                    : distFixed <= contactThresholdFixed || distFixed <= 0;
+                bool movementTargetReached = distFixed <= contactThresholdFixed || distFixed <= 0;
                 if (!pointMove && !directionMove && movementTargetReached)
                 {
                     if (monster.State == MonsterState.Chase)
@@ -884,8 +955,6 @@ public partial class CombatRuntime
                 int curFixedX = monster.PosFixedX;
                 int curFixedY = monster.PosFixedY;
                 int curFixedZ = monster.PosFixedZ;
-                int movementStartFixedX = curFixedX;
-                int movementStartFixedY = curFixedY;
                 int targetFixedX = movementTargetFixedX;
                 int targetFixedY = movementTargetFixedY;
                 int rangeFixed = pointMove || directionMove ? 0 : allowedRangeFixed;
@@ -997,7 +1066,6 @@ public partial class CombatRuntime
                         monster.ChaseHeadingFixed = nextHeading;
                     }
                 }
-                monster.ClientVisibleMovingThisFrame = curFixedX != movementStartFixedX || curFixedY != movementStartFixedY;
                 monster.PosFixedX = curFixedX;
                 monster.PosFixedY = curFixedY;
                 monster.PosFixedZ = chasePm != null && chasePm.TryGetHeightAtFixed(curFixedX, curFixedY, out _)

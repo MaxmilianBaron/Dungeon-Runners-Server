@@ -831,7 +831,7 @@ namespace DungeonRunners.Networking
 
         private static bool VerboseMovementEvidence => ServerDiagnostics.IsEnabled("verboseMovementLogging");
 
-        private bool WriteRemotePlayerMovementSubupdate(RRConnection source, LEWriter writer, ushort remoteBehaviorId, byte relaySessionId, byte[] moveRecord)
+        private static void WriteRemotePlayerMovementSubupdate(LEWriter writer, ushort remoteBehaviorId, byte relaySessionId, byte[] moveRecord)
         {
             writer.WriteByte(0x35);
             writer.WriteUInt16(remoteBehaviorId);
@@ -839,7 +839,22 @@ namespace DungeonRunners.Networking
             writer.WriteByte(relaySessionId);
             writer.WriteByte(0x01);
             writer.WriteBytes(moveRecord);
-            return TryWriteRemoteAvatarEntitySynchInfo(source, writer, remoteBehaviorId, 0x65, "MP-MOVE");
+        }
+
+        private byte[] BuildRemotePlayerMovementSubupdate(RRConnection source, RRConnection viewer, ushort remoteBehaviorId, string instanceKey, byte[] body)
+        {
+            if (!IsPendingConnectionInstanceCurrent(source, instanceKey)
+                || !IsPendingConnectionInstanceCurrent(viewer, instanceKey)
+                || GetConnectionByConnId(source.ConnId) != source
+                || GetConnectionByConnId(viewer.ConnId) != viewer
+                || !TryResolveRemoteBehaviorForViewer(viewer, source, out ushort currentBehaviorId)
+                || currentBehaviorId != remoteBehaviorId)
+                return Array.Empty<byte>();
+            var writer = new LEWriter();
+            writer.WriteBytes(body);
+            return TryWriteRemoteAvatarEntitySynchInfo(source, writer, remoteBehaviorId, 0x65, "MP-MOVE")
+                ? writer.ToArray()
+                : Array.Empty<byte>();
         }
 
         private bool QueueRemotePlayerMovement(RRConnection source, RRConnection viewer, ushort remoteBehaviorId, byte sessionId, byte moveCount, byte[] moveData, string mode)
@@ -863,12 +878,13 @@ namespace DungeonRunners.Networking
                 Buffer.BlockCopy(moveData, offset, moveRecord, 0, UnitMoverUpdateRecordSize);
 
                 var remoteMoveMessage = new LEWriter();
-                if (!WriteRemotePlayerMovementSubupdate(source, remoteMoveMessage, remoteBehaviorId, relaySessionId, moveRecord))
-                    return false;
+                WriteRemotePlayerMovementSubupdate(remoteMoveMessage, remoteBehaviorId, relaySessionId, moveRecord);
                 subupdates.Add(remoteMoveMessage.ToArray());
             }
 
-            viewer.MessageQueue.EnqueueNativeMoverBatch(subupdates, remoteBehaviorId, 0);
+            string instanceKey = ResolveConnectionInstanceKey(source);
+            viewer.MessageQueue.EnqueueNativeMoverBatch(subupdates, remoteBehaviorId, 0,
+                body => BuildRemotePlayerMovementSubupdate(source, viewer, remoteBehaviorId, instanceKey, body));
             peerState.BehaviorInitOwnsFirstMoverAdmission = false;
 
             _moveSummaryPeerRecords += moveCount;

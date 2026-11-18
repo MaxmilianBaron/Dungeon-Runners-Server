@@ -477,7 +477,8 @@ public partial class CombatRuntime
                 || (monster.UnitMoverPathOwner != MONSTER_MOVE_TO_POINT_SEARCH
                     && monster.UnitMoverPathOwner != MONSTER_MOVE_TO_POINT_FOLLOW_REPOSITION
                     && monster.UnitMoverPathOwner != MONSTER_MOVE_TO_POINT_FOLLOW_LINE_OF_SIGHT
-                    && monster.UnitMoverPathOwner != MONSTER_MOVE_TO_POINT_RETURN))
+                    && monster.UnitMoverPathOwner != MONSTER_MOVE_TO_POINT_RETURN
+                    && monster.UnitMoverPathOwner != MONSTER_MOVE_TO_POINT_USE_TARGET))
                 return false;
 
             byte owner = monster.UnitMoverPathOwner;
@@ -570,7 +571,7 @@ public partial class CombatRuntime
                 return UnitMover.StoppedMode;
             if (monster.MoveInDirectionHeadingInit)
                 return UnitMover.MoveInDirectionMode;
-            if (monster.UnitMoverPathOwner != 0
+            if (monster.UnitMoverPathOwner != 0 || monster.RetiredWanderMoverActive
                 || (WanderSimulator.Instance.TryGetSnapshot(monster.EntityId, out WanderStateSnapshot wander) && wander.HasTarget))
                 return UnitMover.MoveToPointMode;
             return UnitMover.StoppedMode;
@@ -581,6 +582,7 @@ public partial class CombatRuntime
             if (monster == null)
                 return;
 
+            monster.RetiredWanderMoverActive = false;
             ClearMonsterMoveToPointPath(monster, 0);
             if (owner == MONSTER_MOVE_TO_POINT_SEARCH)
             {
@@ -658,6 +660,8 @@ public partial class CombatRuntime
                     ClearMonsterFollowRepositionMove(monster);
                 else if (owner == MONSTER_MOVE_TO_POINT_RETURN)
                     StopMonsterReturnMove(monster);
+                else if (owner == MONSTER_MOVE_TO_POINT_USE_TARGET)
+                    ClearMonsterMoveToPointPath(monster, owner);
                 else
                     ClearMonsterFollowFindLineOfSightMove(monster);
                 return;
@@ -772,6 +776,8 @@ public partial class CombatRuntime
                     ClearMonsterFollowRepositionMove(monster);
                 else if (owner == MONSTER_MOVE_TO_POINT_RETURN)
                     StopMonsterReturnMove(monster);
+                else if (owner == MONSTER_MOVE_TO_POINT_USE_TARGET)
+                    ClearMonsterMoveToPointPath(monster, owner);
                 else
                     ClearMonsterFollowFindLineOfSightMove(monster);
                 return;
@@ -853,6 +859,7 @@ public partial class CombatRuntime
             public uint RoomDraw(string site) => RngLedger.Generate(Rng, "room", site, Owner, Monster?.EntityId);
             public bool DispatchUpdateTargets() => Runtime?.DispatchMonsterBehaviorUpdateTargets(this) ?? false;
             public bool DispatchThreatNear() => Runtime?.DispatchMonsterBehaviorThreatNear(Monster) ?? false;
+            public void MarkEncounterActive() => Runtime?.EncounterMarkActive(Monster, "attack-state-enter");
             public Behavior.MonsterBehavior2.ActionSlot DispatchUpdateSkills()
             {
                 RequestedSkillAction = default;
@@ -962,7 +969,7 @@ public partial class CombatRuntime
                 if (Monster == null)
                     return false;
                 if (action == Behavior.MonsterBehavior2.ActionSlot.UseTarget)
-                    return Monster.SelectedActiveSkill != null && Monster.SelectedActiveSkillTargetEntityId != 0;
+                    return Monster.SelectedActiveSkill != null && Monster.ActiveSkillBusyTicksRemaining != 0;
                 if (action == Behavior.MonsterBehavior2.ActionSlot.Use)
                     return Monster.ActiveSkillSelfCycle && Monster.ActiveSkillBusyTicksRemaining != 0;
                 return false;
@@ -983,7 +990,18 @@ public partial class CombatRuntime
             public bool ValidateAttackTarget2Action() => Runtime?.ValidateMonsterAttackTarget2Action(Monster) == true;
             public bool DoAttackAction() => Runtime?.DoMonsterAttackAction(Monster) ?? false;
             public bool DoUseAction() => Runtime?.DoMonsterUseAction(Monster) ?? false;
-            public bool DoUseTargetAction() => Runtime?.DoMonsterUseTargetAction(Monster, UseTargetWeaponInterruptInput) ?? false;
+            public bool DoUseTargetAction(bool initialized) => Runtime?.DoMonsterUseTargetAction(Monster, UseTargetWeaponInterruptInput, initialized) ?? false;
+            public bool HasBoundUseTarget(Behavior.MonsterBehavior2.SkillActionBinding binding)
+                => binding.HasValue && Monster?.SelectedActiveSkill?.Id == binding.ManipulatorId
+                && Monster.SelectedActiveSkillTargetEntityId == binding.TargetEntityId
+                && Runtime.TryGetMonsterUseTarget(Monster, out _);
+            public bool IsUseTargetClear => Runtime?.IsMonsterUseTargetClear(Monster) == true;
+            public bool IsUseTargetApproachActive => Monster?.UnitMoverPathOwner == MONSTER_MOVE_TO_POINT_USE_TARGET;
+            public bool TryInitializeUseTarget(bool enteringUse, out bool initialized)
+                => Runtime.TryInitializeMonsterUseTarget(Monster, enteringUse, out initialized);
+            public void MoveToUseTarget(bool refresh) => Runtime?.MoveMonsterToUseTarget(Monster, refresh);
+            public void FaceUseTarget() => Runtime?.FaceMonsterUseTarget(Monster);
+            public void StopUseTargetApproach() => ClearMonsterMoveToPointPath(Monster, MONSTER_MOVE_TO_POINT_USE_TARGET);
             public bool StartFleeAction() => Runtime?.StartMonsterFleeAction(Monster, this) ?? false;
             public void UpdateFleeAction() => Runtime?.UpdateMonsterFleeAction(Monster, this);
             public bool FleeActionActive => Monster?.FleeActionActive == true;
@@ -1080,6 +1098,7 @@ public partial class CombatRuntime
             }
             if (monster.ReturnMoveActive)
                 ClearMonsterMoveToPointPath(monster, MONSTER_MOVE_TO_POINT_RETURN);
+            monster.RetiredWanderMoverActive = false;
             monster.MoveInDirectionHeadingFixed = UnitMover.NormalizedVectorToHeadingFixed(deltaFixedX, deltaFixedY);
             monster.MoveInDirectionHeadingInit = true;
             return true;

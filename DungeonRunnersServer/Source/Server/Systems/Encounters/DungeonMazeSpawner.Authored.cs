@@ -303,8 +303,13 @@ namespace DungeonRunners.Gameplay
                 snapshot.Spawns[^1].placementRole = "authored-world-entity";
                 return;
             }
-            WorldEntityData data = AuthoredGameplayCatalog.CreateWorldEntityPlacement(snapshot.WorldEntities.Count + 1, snapshot.ZoneName, name, entity, x, y, z, heading);
-            if (data != null) snapshot.WorldEntities.Add(data);
+            int previousEntityId = snapshot.WorldEntities.LastOrDefault(entry => entry.Id > 0)?.Id ?? 0;
+            WorldEntityData data = AuthoredGameplayCatalog.CreateWorldEntityPlacement(previousEntityId + 1, snapshot.ZoneName, name, entity, x, y, z, heading);
+            if (data == null)
+                return;
+            if (data.EntityType == "quest")
+                data.Id = -snapshot.WorldEntities.Count - 1;
+            snapshot.WorldEntities.Add(data);
         }
 
         private static void AddAuthoredEncounter(ProceduralDungeonSnapshot snapshot, EncounterTableManifest table, EncounterMarker marker,

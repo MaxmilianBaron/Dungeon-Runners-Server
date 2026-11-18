@@ -1494,7 +1494,6 @@ namespace DungeonRunners.Networking
             }
             if (state.RetrieveTimer > 0)
                 state.RetrieveCounter++;
-            bool itemAvailable = server.TryGetBlingDroppedItem(state.RetrieveItemEntityId, out GameServer.DroppedItemInfo item);
             if (state.RetrieveState == 4)
             {
                 if (state.RetrieveTimer > 0)
@@ -1507,11 +1506,11 @@ namespace DungeonRunners.Networking
                         state.AnimationFramesRemaining = 0;
                     }
                 }
-                if (!itemAvailable && state.RetrieveTimer == 0)
+                if (state.RetrieveTimer == 0 && !CombatRuntime.Instance.IsItemObjectEntity(state.RetrieveItemEntityId))
                     FinishRetrieve(state, simulationTick, state.RetrieveItemAcquired, "item-and-animation-complete");
                 return;
             }
-            if (!itemAvailable
+            if (!server.TryGetBlingDroppedItem(state.RetrieveItemEntityId, out GameServer.DroppedItemInfo item)
                 || !CanAcquireRetrieveItem(state, item)
                 || !item.IsGoldDrop
                 || item.GoldAmount == 0)
@@ -1918,7 +1917,7 @@ namespace DungeonRunners.Networking
 
         private static bool CanSearchRetrieveItem(GameServer server, State state, GameServer.DroppedItemInfo item)
         {
-            if (!CanAcquireRetrieveItem(state, item))
+            if (!CanAcquireRetrieveItem(state, item) || !server.WasGoldPilePublishedTo(state.Owner, item))
                 return false;
             return item.OwnerCharacterId != 0
                 || !server.HasOtherPlayerWithSameNativeGroupInWorld(state.Owner);

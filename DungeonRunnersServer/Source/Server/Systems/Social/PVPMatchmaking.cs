@@ -140,16 +140,6 @@ namespace DungeonRunners.Gameplay
             }
         }
 
-        public static int EloDelta(int rating, List<int> opponentRatings, double score, int k = 32)
-        {
-            if (opponentRatings == null || opponentRatings.Count == 0) return 0;
-            double expected = 0.0;
-            foreach (int opp in opponentRatings)
-                expected += 1.0 / (1.0 + Math.Pow(10.0, (opp - rating) / 400.0));
-            expected /= opponentRatings.Count;
-            return (int)Math.Round(k * (score - expected));
-        }
-
         public string PickZoneForArchetype(Archetype a)
         {
             var zones = Rules(a).Zones;
@@ -176,6 +166,7 @@ namespace DungeonRunners.Gameplay
             public uint QueuedTick;
             public ulong QueueOrdinal;
             public int PvpRating;
+            public byte PvpRatingFraction;
             public string AssignedMatchId;
             public string TeamKey;
         }
@@ -196,6 +187,13 @@ namespace DungeonRunners.Gameplay
             public Dictionary<string, int> KillCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             public Dictionary<string, int> DeathCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             public Dictionary<string, int> ParticipantRatings = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            public Dictionary<string, byte> ParticipantRatingFractions = new Dictionary<string, byte>(StringComparer.OrdinalIgnoreCase);
+            private readonly Dictionary<string, int> _ratingBeforeFixed32 = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            private readonly Dictionary<string, bool> _ratingTeamByLogin = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+            private readonly HashSet<string> _forfeitedLogins = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            private int _redForfeitKills;
+            private int _blueForfeitKills;
+            public PvpMatchRatingParameters RatingParameters { get; private set; }
             public Dictionary<string, uint> ParticipantCharacterIds = new Dictionary<string, uint>(StringComparer.OrdinalIgnoreCase);
 
             public List<string> RedTeamLogins = new List<string>();
@@ -217,7 +215,7 @@ namespace DungeonRunners.Gameplay
 
             public bool IsWinner(string login)
             {
-                if (string.IsNullOrWhiteSpace(login) || !HasWinner)
+                if (string.IsNullOrWhiteSpace(login) || !HasWinner || _forfeitedLogins.Contains(login))
                     return false;
                 if (!WinnerIsRed.HasValue)
                     return string.Equals(login, WinnerLogin, StringComparison.OrdinalIgnoreCase);
@@ -235,6 +233,89 @@ namespace DungeonRunners.Gameplay
                 if (BlueTeamLogins.Contains(login, StringComparer.OrdinalIgnoreCase))
                     return RedTeamLogins;
                 return Enumerable.Empty<string>();
+            }
+
+            public void FreezeRatingParameters()
+            {
+                if (RatingParameters != null)
+                    throw new InvalidOperationException("Match rating parameters are already frozen");
+                foreach (string login in ParticipantLogins)
+                {
+                    if (!ParticipantRatings.TryGetValue(login, out int rating)
+                        || rating < DungeonRunners.Data.SavedCharacter.MinPvpRating
+                        || rating > DungeonRunners.Data.SavedCharacter.MaxPvpRating)
+                        throw new InvalidOperationException("An exact participant rating is required");
+                    byte fraction = ParticipantRatingFractions.TryGetValue(login, out byte value) ? value : (byte)0;
+                    _ratingBeforeFixed32.Add(login, checked(rating * 256 + fraction));
+                    if (!FreeForAll)
+                    {
+                        bool red = RedTeamLogins.Contains(login, StringComparer.OrdinalIgnoreCase);
+                        bool blue = BlueTeamLogins.Contains(login, StringComparer.OrdinalIgnoreCase);
+                        if (red == blue)
+                            throw new InvalidOperationException("A unique rating team is required");
+                        _ratingTeamByLogin.Add(login, red);
+                    }
+                }
+                RatingParameters = FreeForAll ? PvpMatchRatingParameters.Unrated
+                    : PvpMatchRatingParameters.Freeze(RedTeamLogins.Select(GetRatingBeforeFixed32).ToArray(),
+                        BlueTeamLogins.Select(GetRatingBeforeFixed32).ToArray(), IsRanked(Archetype));
+            }
+
+            public int GetRatingBeforeFixed32(string login)
+            {
+                if (!_ratingBeforeFixed32.TryGetValue(login, out int rating))
+                    throw new InvalidOperationException("The participant rating was not frozen");
+                return rating;
+            }
+
+            public PvpTeamRatingParameters GetTeamRatingParameters(string login)
+            {
+                if (RatingParameters == null || !_ratingTeamByLogin.TryGetValue(login, out bool red))
+                    throw new InvalidOperationException("The participant rating team was not frozen");
+                return red ? RatingParameters.Red : RatingParameters.Blue;
+            }
+
+            public int GetTeamKills(bool red)
+            {
+                var roster = red ? RedTeamLogins : BlueTeamLogins;
+                return checked(roster.Sum(login => KillCounts.TryGetValue(login, out int kills) ? kills : 0)
+                    + (red ? _redForfeitKills : _blueForfeitKills));
+            }
+
+            public bool IsForfeited(string login) => _forfeitedLogins.Contains(login);
+
+            public bool IsScoredDraw => !HasWinner && CombatStartedTick.HasValue
+                && GetTeamKills(true) > 0 && GetTeamKills(true) == GetTeamKills(false);
+
+            public bool TryGetRatingOutcomePercentFixed32(string login, out int outcome)
+            {
+                outcome = 0;
+                if (!IsRanked(Archetype) || Phase != MatchPhase.Ended
+                    || !_ratingBeforeFixed32.ContainsKey(login))
+                    return false;
+                if (_forfeitedLogins.Contains(login))
+                    return true;
+                if (HasWinner)
+                {
+                    outcome = IsWinner(login) ? 0x6400 : 0;
+                    return true;
+                }
+                if (IsScoredDraw)
+                {
+                    outcome = 0x3200;
+                    return true;
+                }
+                return false;
+            }
+
+            public void RecordForfeit(string login)
+            {
+                if (Phase == MatchPhase.Ended || !_forfeitedLogins.Add(login) || FreeForAll)
+                    return;
+                if (IsRed(login))
+                    _blueForfeitKills = checked(_blueForfeitKills + 1);
+                else
+                    _redForfeitKills = checked(_redForfeitKills + 1);
             }
 
             public int CombatTimeSec;
@@ -273,10 +354,13 @@ namespace DungeonRunners.Gameplay
             return unchecked(nowTick - startTick) >= durationTicks;
         }
 
-        public bool EnqueuePlayer(string loginName, uint charSqlId, Archetype archetype, int pvpRating, string teamKey, uint nowTick)
+        public bool EnqueuePlayer(string loginName, uint charSqlId, Archetype archetype, int pvpRating, string teamKey, uint nowTick, byte pvpRatingFraction = 0)
         {
             lock (_lock)
             {
+                if (pvpRating < DungeonRunners.Data.SavedCharacter.MinPvpRating
+                    || pvpRating > DungeonRunners.Data.SavedCharacter.MaxPvpRating)
+                    return false;
                 if (_queue.ContainsKey(loginName))
                 {
                     Debug.LogError($"[PVP-MATCH] {loginName} is already queued");
@@ -301,6 +385,7 @@ namespace DungeonRunners.Gameplay
                     QueuedTick = nowTick,
                     QueueOrdinal = checked(++_nextQueueOrdinal),
                     PvpRating = pvpRating,
+                    PvpRatingFraction = pvpRatingFraction,
                     TeamKey = teamKey ?? ("solo:" + loginName),
                 };
                 Debug.LogError($"[PVP-MATCH] {loginName} queued for {archetype} (rating {pvpRating}). " +
@@ -383,6 +468,7 @@ namespace DungeonRunners.Gameplay
                         var match = CreateMatch(a, participants, nowTick);
                         if (chosen.Count >= 1) match.RedTeamLogins.AddRange(chosen[0].Members.Select(m => m.LoginName));
                         if (chosen.Count >= 2) match.BlueTeamLogins.AddRange(chosen[1].Members.Select(m => m.LoginName));
+                        match.FreezeRatingParameters();
                         newMatches.Add(match);
 
                         Debug.LogError($"[PVP-MATCH] formed {a}: " +
@@ -407,14 +493,14 @@ namespace DungeonRunners.Gameplay
             public readonly List<QueueEntry> Members;
             public readonly uint QueuedTick;
             public readonly ulong QueueOrdinal;
-            public readonly int AvgRating;
+            public readonly double AvgRating;
             public Team(string key, List<QueueEntry> members)
             {
                 Key = key;
                 Members = members;
                 QueuedTick = members.Min(m => m.QueuedTick);
                 QueueOrdinal = members.Min(m => m.QueueOrdinal);
-                AvgRating = (int)members.Average(m => m.PvpRating);
+                AvgRating = members.Average(m => m.PvpRating + m.PvpRatingFraction / 256.0);
             }
         }
 
@@ -576,6 +662,7 @@ namespace DungeonRunners.Gameplay
                 if (_playerToMatch.TryGetValue(loginName, out var matchId)
                     && _activeMatches.TryGetValue(matchId, out var match))
                 {
+                    match.RecordForfeit(loginName);
                     _playerToMatch.Remove(loginName);
                     List<string> activeLogins = match.ParticipantLogins
                         .Where(participant => _playerToMatch.TryGetValue(participant, out string activeMatchId)
@@ -613,7 +700,7 @@ namespace DungeonRunners.Gameplay
 
         private static void ResolveWinnerFromScore(Match match)
         {
-            if (match == null || match.HasWinner || match.KillCounts.Count == 0)
+            if (match == null || match.HasWinner || (match.FreeForAll && match.KillCounts.Count == 0))
                 return;
             if (match.FreeForAll)
             {
@@ -626,15 +713,14 @@ namespace DungeonRunners.Gameplay
                 return;
             }
 
-            int redKills = match.RedTeamLogins.Sum(login => match.KillCounts.TryGetValue(login, out int kills) ? kills : 0);
-            int blueKills = match.BlueTeamLogins.Sum(login => match.KillCounts.TryGetValue(login, out int kills) ? kills : 0);
-            int redDeaths = match.RedTeamLogins.Sum(login => match.DeathCounts.TryGetValue(login, out int deaths) ? deaths : 0);
-            int blueDeaths = match.BlueTeamLogins.Sum(login => match.DeathCounts.TryGetValue(login, out int deaths) ? deaths : 0);
-            if (redKills == blueKills && redDeaths == blueDeaths)
+            int redKills = match.GetTeamKills(true);
+            int blueKills = match.GetTeamKills(false);
+            if (redKills == blueKills)
                 return;
-            bool redWon = redKills > blueKills || (redKills == blueKills && redDeaths < blueDeaths);
+            bool redWon = redKills > blueKills;
             List<string> winningRoster = redWon ? match.RedTeamLogins : match.BlueTeamLogins;
             string representative = winningRoster
+                .Where(login => !match.IsForfeited(login))
                 .OrderByDescending(login => match.KillCounts.TryGetValue(login, out int kills) ? kills : 0)
                 .ThenBy(login => match.DeathCounts.TryGetValue(login, out int deaths) ? deaths : int.MaxValue)
                 .ThenBy(login => login, StringComparer.OrdinalIgnoreCase)
@@ -683,6 +769,7 @@ namespace DungeonRunners.Gameplay
                 _playerToMatch[queueEntry.LoginName] = matchId;
                 queueEntry.AssignedMatchId = matchId;
                 match.ParticipantRatings[queueEntry.LoginName] = queueEntry.PvpRating;
+                match.ParticipantRatingFractions[queueEntry.LoginName] = queueEntry.PvpRatingFraction;
                 match.ParticipantCharacterIds[queueEntry.LoginName] = queueEntry.CharSqlId;
             }
             return match;

@@ -298,6 +298,14 @@ public partial class GameServer
                     if (actionType == 0x06)
                     {
                         bool targetApproachStarted = false;
+                        if (conn.PendingPortalTargetEntityId != 0
+                            && conn.PendingPortalTargetEntityId != targetEntityID)
+                        {
+                            if (conn.UseTargetMovingActive)
+                                CancelUseTargetMoving(conn, "portal-new-action", false);
+                            else
+                                ClearPendingPortalActivation(conn);
+                        }
                         if (conn.PendingDroppedItemTargetEntityId != 0
                             && conn.PendingDroppedItemTargetEntityId != targetEntityID)
                         {
@@ -337,9 +345,8 @@ public partial class GameServer
                             else
                             {
                                 conn.SessionID = sessionID;
-                                QueuePortalActivationResponse(conn, componentId, targetEntityID, responseId, sessionID);
-                                TrackPendingPortalActivation(conn, componentId, targetEntityID, responseId, sessionID, portal);
-                                Debug.LogError($"[PORTAL] Target action relay owns portal approach target=0x{targetEntityID:X4}; pending activation uses current owner mover pose");
+                                if (TrackPendingPortalActivation(conn, componentId, targetEntityID, responseId, sessionID, portal))
+                                    QueuePortalActivationResponse(conn, componentId, targetEntityID, responseId, sessionID);
                             }
                         }
                         else if (IsChest(targetEntityID, out var chestData))
@@ -1568,8 +1575,16 @@ public partial class GameServer
             Debug.LogError($"[{tag}] Queued reflected target action ack in scheduled CEM block target=0x{targetEntityId:X4} session={sessionId}");
         }
 
-        private void TrackPendingPortalActivation(RRConnection conn, ushort componentId, ushort targetEntityId, byte responseId, byte sessionId, ZonePortal portal)
+        private bool TrackPendingPortalActivation(RRConnection conn, ushort componentId, ushort targetEntityId, byte responseId, byte sessionId, ZonePortal portal)
         {
+            if (conn == null || portal == null)
+                return false;
+            if (!TryResolveWorldEntityActivationTargetRadiusFixed(portal.GCType, out int targetRadiusFixed))
+                throw new InvalidDataException($"Portal activation bounds are unavailable for '{portal.GCType}'");
+            if (conn.UseTargetMovingActive)
+                CancelUseTargetMoving(conn, "portal-retarget", false);
+            if (!StartActivateMoving(conn, targetEntityId, portal.PosFixedX, portal.PosFixedY, targetRadiusFixed))
+                return false;
             conn.PendingPortalComponentId = componentId;
             conn.PendingPortalTargetEntityId = targetEntityId;
             conn.PendingPortalResponseId = responseId;
@@ -1577,15 +1592,16 @@ public partial class GameServer
             conn.PendingPortalTargetFixedX = portal.PosFixedX;
             conn.PendingPortalTargetFixedY = portal.PosFixedY;
 
-            if (IsPendingPortalReached(conn))
-                ActivatePendingPortal(conn);
-            else
-                Debug.LogError($"[PORTAL] Pending activation target=0x{targetEntityId:X4} posFixed=({portal.PosFixedX},{portal.PosFixedY}) playerFixed=({conn.PlayerPosFixedX},{conn.PlayerPosFixedY})");
+            Debug.LogError($"[PORTAL] Pending activation target=0x{targetEntityId:X4} posFixed=({portal.PosFixedX},{portal.PosFixedY}) rangeFixed={conn.UseTargetMovingActivateRangeFixed}");
+            return true;
         }
 
         private void CheckPendingPortalActivation(RRConnection conn)
         {
             if (conn == null || conn.PendingPortalTargetEntityId == 0)
+                return;
+            if (conn.UseTargetMovingActive && conn.UseTargetMovingActivate
+                && conn.UseTargetMovingActivateTargetId == conn.PendingPortalTargetEntityId)
                 return;
 
             if (!IsPendingPortalReached(conn))
@@ -1598,17 +1614,17 @@ public partial class GameServer
         {
             if (conn == null || portal == null)
                 return false;
-
+            if (!TryResolveWorldEntityActivationTargetRadiusFixed(portal.GCType, out int targetRadiusFixed))
+                return false;
             ResolveAuthoritativePlayerPositionFixed(conn, out int playerFixedX, out int playerFixedY, out _);
-            long distSq = DistanceSqFixed(playerFixedX, playerFixedY, portal.PosFixedX, portal.PosFixedY);
-            return distSq <= PORTAL_ACTIVATION_DISTANCE_FIXED_SQ;
+            return EvaluateActivationRangeFixed(playerFixedX, playerFixedY, portal.PosFixedX, portal.PosFixedY,
+                ResolveActivationRangeFixed(targetRadiusFixed), out _, out _);
         }
 
         private bool IsPendingPortalReached(RRConnection conn)
         {
-            ResolveAuthoritativePlayerPositionFixed(conn, out int playerFixedX, out int playerFixedY, out _);
-            long distSq = DistanceSqFixed(playerFixedX, playerFixedY, conn.PendingPortalTargetFixedX, conn.PendingPortalTargetFixedY);
-            return distSq <= PORTAL_ACTIVATION_DISTANCE_FIXED_SQ;
+            return conn != null && _portalEntities.TryGetValue(conn.PendingPortalTargetEntityId, out ZonePortal portal)
+                && IsPortalActivationReached(conn, portal);
         }
 
         private void ActivatePendingPortal(RRConnection conn)
@@ -1862,15 +1878,22 @@ public partial class GameServer
                 Debug.LogError($"[PLAYER-ACTION-REJECT] action=UseTarget conn={conn.ConnId} component={input.ComponentId} responseId={input.ResponseId} manip={input.ManipulatorId} target={input.TargetId} monster={input.MonsterEntityId} admissionSequence={input.AdmissionSequence} responseQueued={actionResponseQueued} packetSent={input.PacketSent} reason={reason} sourceFunction=Behavior::doActionLocal@0x00515130->UseTarget::validate@0x00547EE0->Weapon::validateUse@0x00597CA0");
                 return;
             }
-            if (IsActivePlayerUseTargetBusyForInput(input, conn, monster))
+            bool actionFailureQueued = failureAlreadyQueued
+                || (conn.IsConnected && SendUseTargetActionFailure(conn, input.ComponentId, input.ResponseId, reason, input.AdmissionSequence));
+            Combat.Monster activeWeaponTarget = conn.HasActiveUseTarget
+                && conn.ActiveUseTargetPlayerConnId == 0
+                && IsBasicWeaponManipulatorId(conn.ActiveUseTargetFlags)
+                ? Combat.CombatRuntime.Instance.GetMonster(conn.ActiveUseTargetId)
+                    ?? Combat.CombatRuntime.Instance.GetMonsterByComponent(conn.ActiveUseTargetId)
+                : null;
+            if (IsActivePlayerUseTargetBusyForInput(input, conn, monster)
+                || Combat.WeaponUseRuntime.Instance.IsWeaponBusyOnKilledTarget(conn, activeWeaponTarget))
             {
                 DiscardPendingUseTargetBehaviorAction(conn, "UseTarget-unavailable-preserve-busy-active");
-                Debug.LogError($"[PLAYER-ACTION-FAILURE] action=UseTarget conn={conn.ConnId} target={input.TargetId} monster={input.MonsterEntityId} admissionSequence={input.AdmissionSequence} reason=active-weapon-busy-preserved");
+                Debug.LogError($"[PLAYER-ACTION-FAILURE] action=UseTarget conn={conn.ConnId} target={input.TargetId} monster={input.MonsterEntityId} admissionSequence={input.AdmissionSequence} failureQueued={actionFailureQueued} reason=active-weapon-busy-preserved");
                 return;
             }
 
-            bool actionFailureQueued = failureAlreadyQueued
-                || (conn.IsConnected && SendUseTargetActionFailure(conn, input.ComponentId, input.ResponseId, reason, input.AdmissionSequence));
             byte activeSessionId = conn.ActiveUseTargetSessionId;
             bool hadActiveUseTarget = conn.HasActiveUseTarget;
             DiscardPendingUseTargetBehaviorAction(conn, $"UseTarget-{reason}");
@@ -1997,6 +2020,16 @@ public partial class GameServer
                     || HasActiveSkillBehaviorSlot(conn));
         }
 
+        private bool HasCurrentPositionBehaviorSlot(RRConnection conn, PendingPlayerUsePositionBehaviorAction action)
+        {
+            if (action.WeaponAction)
+                return HasCurrentPlayerBehaviorSlot(conn);
+
+            return conn.HasActiveUseTarget
+                || conn.UsePositionActionMirrored
+                || HasActiveSkillBehaviorSlot(conn, GetActiveSkillBusyKey(conn, action.ComponentId, action.ManipulatorId));
+        }
+
         private uint ResolveUsePositionBehaviorBusyUntilTick(
             RRConnection conn,
             PendingPlayerUsePositionBehaviorAction action,
@@ -2048,7 +2081,7 @@ public partial class GameServer
             DiscardPendingUseTargetBehaviorAction(conn, "UsePosition-replaces-pending-UseTarget");
             DiscardPendingSelfCastBehaviorAction(conn);
             int replaced = _pendingPlayerUsePositionBehaviorActions.RemoveAll(pending => pending.ConnId == conn.ConnId);
-            if (HasCurrentPlayerBehaviorSlot(conn))
+            if (HasCurrentPositionBehaviorSlot(conn, action))
             {
                 if (action.WeaponAction && conn.UsePositionWeaponAction)
                 {
@@ -2081,7 +2114,7 @@ public partial class GameServer
                     _pendingPlayerUsePositionBehaviorActions.RemoveAt(actionIndex);
                     continue;
                 }
-                if (HasCurrentPlayerBehaviorSlot(conn))
+                if (HasCurrentPositionBehaviorSlot(conn, action))
                 {
                     actionIndex++;
                     continue;
@@ -2259,10 +2292,14 @@ public partial class GameServer
             bool gnomeAvailable = monsterEntityId == 0 && targetPlayerConnId == 0 && IsBlingGnomeSkillTargetAvailable(conn, useFlags, targetId);
             if (!monsterAvailable && !playerAvailable && !gnomeAvailable)
             {
-                bool sent = conn.IsConnected && SendUseTargetActionFailure(conn, componentId, responseId, "pending-target-unavailable", admissionSequence);
+                bool pendingMonsterWeaponAction = monsterEntityId != 0 && IsBasicWeaponManipulatorId(useFlags);
+                bool sent = !pendingMonsterWeaponAction
+                    && conn.IsConnected
+                    && SendUseTargetActionFailure(conn, componentId, responseId, "pending-target-unavailable", admissionSequence);
                 ArmPeerUseTargetTermination(conn, sessionId, unchecked(simulationTick + 1));
                 ushort controlComponentId = ResolveClientControlComponentId(conn, componentId);
-                bool controlResetQueued = conn.IsConnected
+                bool controlResetQueued = !pendingMonsterWeaponAction
+                    && conn.IsConnected
                     && conn.IsSpawned
                     && controlComponentId != 0
                     && !HasCurrentPlayerBehaviorAction(conn, playerEntityId);
@@ -2309,7 +2346,7 @@ public partial class GameServer
                 actorFixedY = conn.UseTargetMovingFixedY;
                 actorFixedZ = conn.UseTargetMovingFixedZ;
             }
-            TryCompleteActionMirroredUseTargetMovingForUse(
+            if (TryCompleteActionMirroredUseTargetMovingForUse(
                 conn,
                 state,
                 simulationTick,
@@ -2317,7 +2354,9 @@ public partial class GameServer
                 targetFixedY,
                 actorFixedX,
                 actorFixedY,
-                actorFixedZ);
+                actorFixedZ))
+                return;
+            BeginActionMirroredUseTargetMoving(conn, simulationTick, targetFixedX, targetFixedY);
         }
 
         private void FlushPendingPlayerUseTargetActionInputs(uint writerTick)

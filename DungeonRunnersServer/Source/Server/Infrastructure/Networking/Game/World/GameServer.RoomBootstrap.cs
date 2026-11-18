@@ -222,6 +222,8 @@ namespace DungeonRunners.Networking
                 RRConnection conn = pending.Connection;
                 if (!failedParticipants.Contains(conn) && conn.IsConnected)
                 {
+                    if (conn.Avatar != null)
+                        CombatRuntime.Instance.GetPlayer(conn.Avatar.Id)?.PlayerState?.AnchorEntitySynchInfoHPToTick(checked(simulationTick - 1));
                     conn.AllowFlush = true;
                     conn.TickUpdatesActive = true;
                     SendGroupZoneStatesToViewer(conn);

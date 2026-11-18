@@ -509,6 +509,19 @@ public partial class CombatRuntime
             return unchecked((state?.WeaponRangeF32 ?? 0) + avatarRadiusF32 + avatarRadiusF32);
         }
 
+        public int ResolvePlayerUnitBehaviorRadiusF32(PlayerState state)
+        {
+            int radiusF32 = state?.UnitDescriptionCollisionRadiusF32 ?? ResolveAvatarCombatRadiusFixed();
+            return ScaleNativeUnitBehaviorRadiusF32(radiusF32, state?.SizeModPercent ?? 100);
+        }
+
+        public int ResolvePlayerPvpWeaponTargetClearRangeF32(PlayerState state, PlayerState targetState)
+        {
+            int actorRadiusF32 = ResolvePlayerUnitBehaviorRadiusF32(state);
+            int targetRadiusF32 = ResolvePlayerUnitBehaviorRadiusF32(targetState);
+            return unchecked((state?.WeaponRangeF32 ?? 0) + actorRadiusF32 + targetRadiusF32);
+        }
+
         private static int ResolveActiveSkillTargetClearRangeFixed(int skillRangeF32, int actorRadiusF32, int targetRadiusF32)
         {
             int scaledActorRadiusF32 = unchecked((int)(((long)actorRadiusF32 * 0x180) >> 8));

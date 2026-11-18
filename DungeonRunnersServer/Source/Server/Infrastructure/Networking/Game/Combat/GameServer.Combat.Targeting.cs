@@ -187,8 +187,6 @@ public partial class GameServer
         private const int ACTIVATE_RANGE_MARGIN_FIXED = 0x1400;
         private const int UNIT_MOVER_AVATAR_TOUCHING_SPEED_MOD_F32 = 0x3200;
         private const int CLIENT_ENTITY_MOVEMENT_RECORD_BUDGET_PER_FLUSH = int.MaxValue - 1;
-        private const int PORTAL_ACTIVATION_DISTANCE_FIXED = 40 * UnitMover.Fixed;
-        private const long PORTAL_ACTIVATION_DISTANCE_FIXED_SQ = (long)PORTAL_ACTIVATION_DISTANCE_FIXED * PORTAL_ACTIVATION_DISTANCE_FIXED;
 
         private static bool ShouldEndClientDrivenTargetApproachForOwnerMove(bool positionChanged, long beforeDistSqFixed, long afterDistSqFixed)
         {
@@ -393,7 +391,7 @@ public partial class GameServer
             int dy = conn.UsePositionActionTargetFixedY - actorFixedY;
             if (dx == 0 && dy == 0)
                 return false;
-            int heading = UnitMover.VectorToHeadingFixed(dx, dy);
+            int heading = UnitMover.GetDestHeadingFixed(dx, dy);
             conn.PlayerHeadingFixed = heading;
             conn.LivePlayerHeadingFixed = heading;
             conn.ReflectedAvatarHeadingFixed = heading;
@@ -565,7 +563,9 @@ public partial class GameServer
                 return false;
             RRConnection viewer = ResolveCanonicalUnitFollowClientViewer(conn);
             if (viewer == null || !conn.UnitFollowClientWriterStateInitialized)
-                return ActionMirroredMoveToPointOwnsUnitMover(conn) || conn.UsePositionActionMirrored;
+                return ActionMirroredMoveToPointOwnsUnitMover(conn)
+                    || (conn.UsePositionActionMirrored
+                        && (conn.UsePositionActionStoppedFollowClient || conn.UnitFollowClientMovementSamples.Count == 0));
             return conn.UnitFollowClientActionActive && !conn.UnitFollowClientFollowingClient;
         }
 
@@ -1763,6 +1763,32 @@ public partial class GameServer
             return true;
         }
 
+        private bool BeginActionMirroredUseTargetMoving(RRConnection conn, uint tickIndex, int targetFixedX, int targetFixedY)
+        {
+            if (conn.UseTargetMovingMoverStarted)
+                return true;
+            if (!conn.UseTargetMovingInputAdmitted
+                || unchecked((int)(tickIndex - conn.UseTargetMovingAdmissionTick)) < 0
+                || AwaitActionMirroredUnitFollowClient(conn, tickIndex, "UseTarget::States@0x00548370 state=0x1D"))
+                return false;
+            SyncUseTargetMovingFixedState(conn);
+            StopFollowingClientForActionMoveToPoint(conn);
+            conn.UseTargetMovingMoverActive = BuildUseTargetMovingPath(conn, ResolveUseTargetMovingPathMap(conn), targetFixedX, targetFixedY);
+            conn.UseTargetMovingMoverStarted = true;
+            conn.UseTargetMovingMoverInitialUpdatePending = false;
+            conn.UseTargetMovingRetargetCountdown = 15;
+            if (!conn.UseTargetMovingMoverActive)
+            {
+                CancelUseTargetMoving(conn, "state2-path-request");
+                return false;
+            }
+            conn.ReflectedAvatarUnitMoverMode = UnitMover.MoveToPointMode;
+            conn.OwnerUnitBehaviorMoverMode = UnitMover.MoveToPointMode;
+            SyncReflectedAvatarCombatPosition(conn);
+            Debug.LogError($"[USE-TARGET-MOVING] state=2-enter conn={conn.ConnId} target={conn.UseTargetMovingEntityId} tick={tickIndex} admissionTick={conn.UseTargetMovingAdmissionTick} countdown={conn.UseTargetMovingRetargetCountdown} sourceFunction=UseTarget::States@0x00548370");
+            return true;
+        }
+
         private void TickActionMirroredUseTargetMoving(RRConnection conn, PlayerState state, CombatPlayer player, uint tickIndex, int targetFixedX, int targetFixedY)
         {
             if (!conn.UseTargetMovingInputAdmitted
@@ -1785,32 +1811,8 @@ public partial class GameServer
                 actorFixedZ = conn.UseTargetMovingFixedZ;
             }
             PathMap pathMap = ResolveUseTargetMovingPathMap(conn);
-            if (!conn.UseTargetMovingMoverStarted)
-            {
-                if (AwaitActionMirroredUnitFollowClient(conn, tickIndex, "UseTarget::States@0x00548370 state=0x1D"))
-                    return;
-                uint moveToPointEnterTick = conn.UseTargetMovingAdmissionTick;
-                if (unchecked((int)(tickIndex - moveToPointEnterTick)) < 0)
-                {
-                    Debug.LogError($"[USE-TARGET-MOVING] state=0x1d-update conn={conn.ConnId} target={conn.UseTargetMovingEntityId} tick={tickIndex} admissionTick={conn.UseTargetMovingAdmissionTick} moveToPointEnterTick={moveToPointEnterTick} unitFixed=({conn.UnitFollowClientPosFixedX},{conn.UnitFollowClientPosFixedY},{conn.UnitFollowClientPosFixedZ}) unitMode={conn.OwnerUnitBehaviorMoverMode} sourceFunction=UseTarget::States@0x00548370->StateMachine::Process@0x005F0980");
-                    return;
-                }
-                SyncUseTargetMovingFixedState(conn);
-                StopFollowingClientForActionMoveToPoint(conn);
-                conn.UseTargetMovingMoverActive = BuildUseTargetMovingPath(conn, pathMap, targetFixedX, targetFixedY);
-                conn.UseTargetMovingMoverStarted = true;
-                conn.UseTargetMovingMoverInitialUpdatePending = false;
-                conn.UseTargetMovingRetargetCountdown = 15;
-                if (!conn.UseTargetMovingMoverActive)
-                {
-                    CancelUseTargetMoving(conn, "state2-path-request");
-                    return;
-                }
-                conn.ReflectedAvatarUnitMoverMode = UnitMover.MoveToPointMode;
-                conn.OwnerUnitBehaviorMoverMode = UnitMover.MoveToPointMode;
-                SyncReflectedAvatarCombatPosition(conn);
-                Debug.LogError($"[USE-TARGET-MOVING] state=2-enter conn={conn.ConnId} target={conn.UseTargetMovingEntityId} tick={tickIndex} admissionTick={conn.UseTargetMovingAdmissionTick} countdown={conn.UseTargetMovingRetargetCountdown} sourceFunction=UseTarget::States@0x00548370");
-            }
+            if (!BeginActionMirroredUseTargetMoving(conn, tickIndex, targetFixedX, targetFixedY))
+                return;
             if (!conn.UseTargetMovingMoverActive)
             {
                 CancelUseTargetMoving(conn, "state2-mover-stopped");
@@ -1835,9 +1837,11 @@ public partial class GameServer
             {
                 var monster = CombatRuntime.Instance.GetMonster(conn.ActiveUseTargetId)
                            ?? CombatRuntime.Instance.GetMonsterByComponent(conn.ActiveUseTargetId);
-                bool targetMovingThisFrame = BlingGnomeLockstepRuntime.Instance.TryGetSnapshot(conn.ActiveUseTargetId, out BlingGnomeLockstepSnapshot gnome)
-                    ? gnome.FollowMoverMovingThisFrame
-                    : CombatRuntime.Instance.IsMonsterClientVisibleMovingThisFrame(monster);
+                bool targetMovingThisFrame = TryGetActivePvpTarget(conn, out _, out _, out CombatPlayer pvpTargetPlayer)
+                    ? pvpTargetPlayer.ClientSimulationMovingThisFrame
+                    : BlingGnomeLockstepRuntime.Instance.TryGetSnapshot(conn.ActiveUseTargetId, out BlingGnomeLockstepSnapshot gnome)
+                        ? gnome.FollowMoverMovingThisFrame
+                        : CombatRuntime.Instance.IsMonsterClientVisibleMovingThisFrame(monster);
                 bool canReachTarget = pathMap != null && pathMap.CanReachPointFixed(
                     conn.UseTargetMovingFixedX,
                     conn.UseTargetMovingFixedY,
@@ -1931,6 +1935,12 @@ public partial class GameServer
                 ZoneCheckpoint checkpoint = null;
                 bool completeCheckpoint = conn.PendingCheckpointTargetEntityId == targetId
                     && IsCheckpoint(targetId, out checkpoint);
+                ushort portalComponentId = conn.PendingPortalComponentId;
+                byte portalResponseId = conn.PendingPortalResponseId;
+                byte portalSessionId = conn.PendingPortalSessionId;
+                ZonePortal portal = null;
+                bool completePortal = conn.PendingPortalTargetEntityId == targetId
+                    && _portalEntities.TryGetValue(targetId, out portal);
                 PrimeUseTargetMovingHeading(conn, targetFixedX, targetFixedY);
                 SendUseTargetMovingTerminal(conn);
                 CancelUseTargetMoving(conn, "activate-range", false);
@@ -1941,6 +1951,8 @@ public partial class GameServer
                     HandleWorldEntityChestActivation(conn, chestComponentId, targetId, chestResponseId, chestSessionId, worldEntityChest);
                 else if (completeCheckpoint)
                     HandleCheckpointActivation(conn, checkpointComponentId, targetId, checkpointResponseId, checkpointSessionId, checkpoint, false);
+                else if (completePortal)
+                    HandlePortalActivation(conn, portalComponentId, targetId, portalResponseId, portalSessionId, portal);
                 return;
             }
             if (!conn.UseTargetMovingHasFixedState)
@@ -2195,6 +2207,7 @@ public partial class GameServer
                 "CLIENT-ENTITY-FLUSH"))
             {
                 LogClientEntityAdmissionBlock(conn, messages, _combatTick, clientEntityUpdateSerial);
+                MarkGoldPileSpawnsFlushed(conn, messages);
                 AdmitPeerPlayerActionResponses(conn, messages, _combatTick);
                 MarkPendingPlayerUseTargetActionPacketsFlushed(
                     conn,
@@ -2231,6 +2244,7 @@ public partial class GameServer
                     _combatTick,
                     _combatTick);
                 MarkPendingSummonInitializationsFlushed(conn, messages, _combatTick);
+                MarkPendingHeroStatInputsFlushed(conn, messages, messageRoles, _combatTick);
                 QueuePendingClientActionInputBatch(conn, messages.Count, _combatTick);
                 _unitContainer?.ApplyPendingConsumableModifierAdmissions(conn, messages, _combatTick);
                 ApplyPendingHotbarPassiveAdmissions(conn, messages, _combatTick);
@@ -2310,19 +2324,37 @@ public partial class GameServer
                     : conn.HasOwnerAckFollowClientPosition
                         ? conn.OwnerAckFollowClientHeadingFixed
                         : conn.PlayerHeadingFixed;
-                StopFollowingClientAtCurrentPosition(
-                    conn,
-                    fixedX,
-                    fixedY,
-                    fixedZ,
-                    headingFixed,
-                    "ClientUnitBehavior::SuspendClientMovement@0x00518E10->UnitBehavior::StopFollowingClient@0x005203A0");
-                if (conn.UsePositionActionMirrored)
+                if (conn.UnitFollowClientClientControlEnabled)
                 {
-                    conn.UsePositionActionStoppedFollowClient = true;
-                    MarkPeerUsePositionStoppedFollowingClient(conn, simulationTick);
+                    conn.UnitFollowClientClientControlEnabled = false;
+                    conn.UnitFollowClientFollowingClient = false;
+                    StopFollowingClientAtCurrentPosition(
+                        conn,
+                        fixedX,
+                        fixedY,
+                        fixedZ,
+                        headingFixed,
+                        "UnitBehavior::ClearClientControl@0x00520A50->UnitBehavior::StopFollowingClient@0x005203A0");
+                    if (conn.UnitFollowClientMoverMode == UnitMover.FollowClientMode)
+                    {
+                        conn.UnitFollowClientMovementSamples.Clear();
+                        conn.UnitFollowClientAppliedOrdinal = conn.UnitFollowClientReceivedOrdinal;
+                        conn.UnitFollowClientMoverMode = UnitMover.StoppedMode;
+                        conn.UnitFollowClientMovingThisFrame = false;
+                        SyncUnitFollowClientCurrentState(conn);
+                    }
+                    if (conn.UsePositionActionMirrored)
+                    {
+                        conn.UsePositionActionStoppedFollowClient = true;
+                        MarkPeerUsePositionStoppedFollowingClient(conn, simulationTick);
+                    }
                 }
-                Debug.LogError($"[OWNER-CONTROL-INPUT] state=apply conn={conn.ConnId} component={input.ComponentId} value=false packetWriterTick={input.PacketWriterTick} simulationApplyTick={simulationTick} messageIndex={input.WireMessageIndex} positionFixed=({fixedX},{fixedY},{fixedZ}) headingFixed={headingFixed} sourceFunction=UnitBehavior::processUpdate@0x00520020->ClientUnitBehavior::SuspendClientMovement@0x00518E10");
+                conn.UnitFollowClientClientControlEnabled = true;
+                if (!HasCurrentPlayerBehaviorAction(conn, conn.Avatar?.Id ?? 0)
+                    && !(conn.UseTargetMovingActive && conn.UseTargetMovingActivate)
+                    && !conn.UnitFollowClientActionActive)
+                    RemarryClientToLogicalMovement(conn, "UnitBehavior::processUpdate@0x0052015E");
+                Debug.LogError($"[OWNER-CONTROL-INPUT] state=apply conn={conn.ConnId} component={input.ComponentId} value=false packetWriterTick={input.PacketWriterTick} simulationApplyTick={simulationTick} messageIndex={input.WireMessageIndex} positionFixed=({fixedX},{fixedY},{fixedZ}) headingFixed={headingFixed} sourceFunction=UnitBehavior::processUpdate@0x00520020->UnitBehavior::ClearClientControl@0x00520A50");
                 Debug.LogError($"[OWNER-CONTROL-INPUT] state=apply conn={conn.ConnId} component={input.ComponentId} value=true packetWriterTick={input.PacketWriterTick} simulationApplyTick={simulationTick} messageIndex={input.WireMessageIndex} positionFixed=({fixedX},{fixedY},{fixedZ}) headingFixed={headingFixed} sourceFunction=UnitBehavior::processUpdate@0x00520020");
             }
         }
@@ -3030,7 +3062,7 @@ public partial class GameServer
                     || admission.AvatarEntityId != (uint)conn.Avatar.Id)
                     continue;
                 lock (conn.SendLock)
-                    RecalculateHotbarPassiveBonuses(conn, null, admission.Passives, sendModifiers: false, keepPvpPassive: true);
+                    RecalculateHotbarPassiveBonuses(conn, null, admission.Passives, sendModifiers: false);
                 Debug.LogError($"[HOTBAR-PASSIVE-ADMISSION] conn={conn.ConnId} sequence={admission.Sequence} avatar={admission.AvatarEntityId} receivedTick={admission.ReceivedTick} simulationApplyTick={simulationApplyTick} messageIndex={messageIndex} passiveCount={admission.Passives?.Count ?? 0} phase=client-entity-flush");
             }
         }

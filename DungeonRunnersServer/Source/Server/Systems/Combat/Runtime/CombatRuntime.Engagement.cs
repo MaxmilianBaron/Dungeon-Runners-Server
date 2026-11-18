@@ -18,7 +18,7 @@ public partial class CombatRuntime
                 return false;
             if (!monster.AggroTriggered && WanderSimulator.Instance.TryGetSnapshot(monster.EntityId, out WanderStateSnapshot wander))
                 return wander.MovingThisFrame;
-            return monster.ClientVisibleMovingThisFrameTick == CombatTick && monster.ClientVisibleMovingThisFrame;
+            return monster.UnitMoverMovingThisFrame;
         }
 
         private void AdvanceMonsterClientVisiblePosition(Monster monster)
@@ -234,7 +234,7 @@ public partial class CombatRuntime
                 ClearMonsterCombatContact(monster, player);
             }
             string aggroReason = clientWeaponUseStarted && !inAuthoredAggro && !inContact ? "client-client-use" : "client";
-            AggroMonster(monster, player, aggroReason, false);
+            AggroMonster(monster, player, aggroReason);
             if (inContact)
             {
                 RefreshMonsterCombatContact(monster, player);
@@ -1308,7 +1308,7 @@ public partial class CombatRuntime
                 Debug.LogError($"[POISON-SHOT-MOD] reject target={target.Name}#{target.EntityId} source={sourceEntityId} modifier={spell.ProjectileModifierId} incomingPower={powerLevel} existingPower={existingModifier.PowerLevel} incomingDuration={durationTicks} existingRemaining={existingRemainingTicks} stack={spell.ProjectileModifierStackRule ?? "UNKNOWN"} sourceFunction=Modifiers::addModifierLocal@0x00501770");
                 return result;
             }
-            long modifierOrder = replace ? existingModifier.Order : ++_nextCombatModifierOrder;
+            long modifierOrder = ++_nextCombatModifierOrder;
             _activeMonsterModifiers[key] = new ActiveMonsterModifier
             {
                 Order = modifierOrder,
@@ -1627,11 +1627,7 @@ public partial class CombatRuntime
             if (!MatchesInstance(monster, player.InstanceKey)) return;
             if (!monster.IsAlive) return;
             Debug.LogError($"[MON-ONATTACKED-ADMISSION] monster={monster.Name}#{monster.EntityId} player={player.Name}#{player.EntityId} source={reason ?? "unknown"} rangeGate=False smmsg=0x09 sourceFunction=Damage::apply@0x004F6580->MonsterBehavior2::onAttacked@0x0051B550");
-            uint directPlayerWeaponHitTick = WeaponUseRuntime.Instance.WasDirectPlayerWeaponHitAppliedAtTick(player.EntityId, monster.EntityId, _combatTick)
-                ? _combatTick
-                : 0;
-            uint playerDamageTick = _combatTick;
-            AggroMonster(monster, player, reason, false, true, uint.MaxValue, directPlayerWeaponHitTick, playerDamageTick);
+            AggroMonster(monster, player, reason);
             NotifyMonsterBehaviorThreatInput(monster, player, false);
         }
 

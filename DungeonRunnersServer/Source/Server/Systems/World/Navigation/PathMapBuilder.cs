@@ -97,7 +97,12 @@ namespace DungeonRunners.Utilities
                 MarkMazeFootprintFixed(cell, inMazeFootprint, gridW, gridH, minFixedX, minFixedY);
 
                 TileLayout layout;
-                try { layout = TileLayoutLoader.LoadAuthored(cell.TileType); }
+                try
+                {
+                    layout = staticWorld
+                        ? TileLayoutLoader.LoadAuthoredClientScene(cell.TileType)
+                        : TileLayoutLoader.LoadAuthored(cell.TileType);
+                }
                 catch (Exception e)
                 {
                     tilesSkippedNoFile++;

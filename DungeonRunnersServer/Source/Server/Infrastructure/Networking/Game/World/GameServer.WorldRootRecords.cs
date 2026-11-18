@@ -162,15 +162,17 @@ namespace DungeonRunners.Networking
             if (match != null && match.Archetype == PVPMatchmaking.Archetype.GroupPracticeMatch)
             {
                 root.Initialize.WriteByte(0x01);
-                WritePVPTeamScore(root.Initialize, "pvp.FFATeam");
+                WritePVPTeamScore(root.Initialize, "pvp.FFATeam", default);
             }
             else
             {
                 string teamList = match != null && match.Archetype == PVPMatchmaking.Archetype.GroupDuelMatch
                     ? "pvp.DuelTeamList" : "pvp.DefaultTeamList";
                 root.Initialize.WriteByte(0x02);
-                WritePVPTeamScore(root.Initialize, teamList + ".RedTeam");
-                WritePVPTeamScore(root.Initialize, teamList + ".BlueTeam");
+                if (match != null && match.RatingParameters == null)
+                    throw new System.InvalidOperationException("Match rating parameters must be frozen before controller serialization");
+                WritePVPTeamScore(root.Initialize, teamList + ".RedTeam", match?.RatingParameters.Red ?? default);
+                WritePVPTeamScore(root.Initialize, teamList + ".BlueTeam", match?.RatingParameters.Blue ?? default);
             }
             return root;
         }

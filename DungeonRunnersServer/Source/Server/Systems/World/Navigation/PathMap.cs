@@ -751,8 +751,6 @@ namespace DungeonRunners.Core
                 out resolvedFixedZ,
                 out _,
                 out _);
-            if (TryGetHeightAtFixed(resolvedFixedX, resolvedFixedY, out int mapHeightFixed))
-                resolvedFixedZ = mapHeightFixed;
             return collided;
         }
 
@@ -830,10 +828,19 @@ namespace DungeonRunners.Core
                     0,
                     false,
                     out PathNode node,
-                    out int clampedStartFixedX,
-                    out int clampedStartFixedY))
+                    out _,
+                    out _))
                 return 0;
 
+            return CastGroundRayDistanceFromNodeFixed(node, startFixedX, startFixedY,
+                directionFixedX, directionFixedY, requestedDistanceFixed, out _, out _);
+        }
+
+        private int CastGroundRayDistanceFromNodeFixed(PathNode node, int startFixedX, int startFixedY,
+            int directionFixedX, int directionFixedY, int requestedDistanceFixed, out PathNode hitNode, out int hitEdge)
+        {
+            hitNode = node;
+            hitEdge = -1;
             int actualDistanceFixed = 0;
             int maxIterations = Math.Max(_nodeGrid.Count, 1);
             for (int iteration = 0; iteration < maxIterations; iteration++)
@@ -841,8 +848,8 @@ namespace DungeonRunners.Core
                 if (!CollideRayWithNodeFixed(
                         node.WorldFixedX,
                         node.WorldFixedY,
-                        clampedStartFixedX,
-                        clampedStartFixedY,
+                        startFixedX,
+                        startFixedY,
                         directionFixedX,
                         directionFixedY,
                         out int exitDistanceFixed,
@@ -850,8 +857,14 @@ namespace DungeonRunners.Core
                     || exitEdge < 0)
                     return actualDistanceFixed;
                 if (requestedDistanceFixed <= exitDistanceFixed)
+                {
+                    hitNode = node;
+                    hitEdge = -1;
                     return requestedDistanceFixed;
+                }
 
+                hitNode = node;
+                hitEdge = exitEdge;
                 actualDistanceFixed = exitDistanceFixed;
                 if ((node.ConnectionFlags & (1 << exitEdge)) == 0)
                     return actualDistanceFixed;
@@ -911,14 +924,9 @@ namespace DungeonRunners.Core
 
         public bool CastGroundRaySlideFixed(int startFixedX, int startFixedY, int startFixedZ, int targetFixedX, int targetFixedY, out int slidFixedX, out int slidFixedY, out int slidFixedZ)
         {
-            if (!TryGetClosestWalkableNodeAtWorldFixed(
-                    startFixedX,
-                    startFixedY,
-                    startFixedZ,
-                    true,
-                    out _,
-                    out int clampedStartFixedX,
-                    out int clampedStartFixedY))
+            PathNode node = GetClosestNodeFixed(startFixedX, startFixedY, startFixedZ);
+            if (node == null || !TryBuildNativeRayDirectionFixed(targetFixedX - startFixedX, targetFixedY - startFixedY,
+                    out int dirX, out int dirY, out int totalDistanceFixed))
             {
                 slidFixedX = startFixedX;
                 slidFixedY = startFixedY;
@@ -926,26 +934,35 @@ namespace DungeonRunners.Core
                 return false;
             }
 
-            if (!CastGroundRayHitHeightFixed(clampedStartFixedX, clampedStartFixedY, targetFixedX, targetFixedY, out int hitFixedX, out int hitFixedY, out int hitFixedZ, out int exitEdge, out int remainingFixed))
-            {
-                slidFixedX = hitFixedX; slidFixedY = hitFixedY; slidFixedZ = hitFixedZ;
+            int clampedStartFixedX = startFixedX;
+            int clampedStartFixedY = startFixedY;
+            ClampPointToNodeFixed(node, ref clampedStartFixedX, ref clampedStartFixedY);
+            int firstDistanceFixed = CastGroundRaySlideSegmentFixed(node, clampedStartFixedX, clampedStartFixedY, dirX, dirY,
+                totalDistanceFixed, out slidFixedX, out slidFixedY, out slidFixedZ, out int exitEdge);
+            if (exitEdge < 0)
                 return false;
-            }
-            int dx = targetFixedX - clampedStartFixedX;
-            int dy = targetFixedY - clampedStartFixedY;
-            if (!TryBuildNativeRayDirectionFixed(dx, dy, out int dirX, out int dirY, out int _) ||
-                !TryResolveNativeSlideDirectionFixed(exitEdge, dirX, dirY, out int slideUnitX, out int slideUnitY))
+
+            int remainingFixed = totalDistanceFixed - firstDistanceFixed;
+            if (remainingFixed > 0)
             {
-                slidFixedX = hitFixedX; slidFixedY = hitFixedY; slidFixedZ = hitFixedZ;
-                return true;
+                PathNode slideNode = GetClosestNodeFixed(slidFixedX, slidFixedY, slidFixedZ);
+                if (slideNode != null && TryResolveNativeSlideDirectionFixed(exitEdge, dirX, dirY, out int slideUnitX, out int slideUnitY))
+                    CastGroundRaySlideSegmentFixed(slideNode, slidFixedX, slidFixedY, slideUnitX, slideUnitY,
+                        remainingFixed, out slidFixedX, out slidFixedY, out slidFixedZ, out _);
             }
-            int slideDx = (int)(((long)remainingFixed * slideUnitX) >> 8);
-            int slideDy = (int)(((long)remainingFixed * slideUnitY) >> 8);
-            int slideEndFixedX = hitFixedX + slideDx;
-            int slideEndFixedY = hitFixedY + slideDy;
-            CastGroundRayHitHeightFixed(hitFixedX, hitFixedY, slideEndFixedX, slideEndFixedY, out int fx, out int fy, out int fz, out int _, out int _);
-            slidFixedX = fx; slidFixedY = fy; slidFixedZ = fz;
             return true;
+        }
+
+        private int CastGroundRaySlideSegmentFixed(PathNode node, int startFixedX, int startFixedY, int dirX, int dirY,
+            int requestedDistanceFixed, out int endFixedX, out int endFixedY, out int endFixedZ, out int hitEdge)
+        {
+            int distanceFixed = CastGroundRayDistanceFromNodeFixed(node, startFixedX, startFixedY, dirX, dirY,
+                requestedDistanceFixed, out PathNode hitNode, out hitEdge);
+            endFixedX = startFixedX + FixedMultiply(dirX, distanceFixed);
+            endFixedY = startFixedY + FixedMultiply(dirY, distanceFixed);
+            ClampPointToNodeFixed(hitNode, ref endFixedX, ref endFixedY);
+            endFixedZ = hitNode.HeightFixed;
+            return distanceFixed;
         }
 
         public bool CastGroundRaySlideFixed(int startFixedX, int startFixedY, int targetFixedX, int targetFixedY, out int slidFixedX, out int slidFixedY)

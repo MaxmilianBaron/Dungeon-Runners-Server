@@ -1153,6 +1153,15 @@ public static class AuthoredGameplayCatalog
         GCNode effective = Effective(placement);
         GCNode description = effective.GetChild("Description") ?? effective;
         string entityType = ClassifyWorldEntity(effective, description);
+        if (entityType == null && AuthoredWorldLayout.IsKindOf(effective, "NonCombatInteractive"))
+        {
+            GCNode questDescription = effective.GetDescription("WorldEntityDesc");
+            if (questDescription?.GetBool("QuestRequired", false) == true)
+            {
+                description = questDescription;
+                entityType = "quest";
+            }
+        }
         return entityType == null ? null : BuildWorldEntity(id, zone, name, effective, description, entityType, x, y, z, heading);
     }
 

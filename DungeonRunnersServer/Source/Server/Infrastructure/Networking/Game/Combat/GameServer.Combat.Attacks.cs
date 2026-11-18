@@ -402,7 +402,7 @@ public partial class GameServer
             return false;
         }
 
-        private bool HasActiveSkillBehaviorSlot(RRConnection conn)
+        private bool HasActiveSkillBehaviorSlot(RRConnection conn, string excludedBusyKey = null)
         {
             if (conn == null)
                 return false;
@@ -422,7 +422,9 @@ public partial class GameServer
                     _activeSkillBusyKeys.RemoveAt(index);
                     continue;
                 }
-                return true;
+                if (!string.Equals(key, excludedBusyKey, StringComparison.Ordinal))
+                    return true;
+                index++;
             }
             return false;
         }
@@ -1006,17 +1008,16 @@ public partial class GameServer
         {
             distanceF32 = 0;
             allowedRangeF32 = 0;
-            if (conn == null || spell == null || spell.Range <= 0) return false;
-            allowedRangeF32 = Math.Max(0x100, checked(spell.Range * 0x100));
+            if (conn == null || spell == null) return false;
+            allowedRangeF32 = unchecked(spell.InitUseRangeF32
+                + (conn.UnitFollowClientClientControlEnabled ? spell.ClientSyncToleranceF32 : 0));
             ResolveAuthoritativePlayerPositionFixed(conn, out int actorFixedX, out int actorFixedY, out int actorFixedZ);
-            long dx = (long)posFixedX - actorFixedX;
-            long dy = (long)posFixedY - actorFixedY;
-            long dz = (long)posFixedZ - actorFixedZ;
-            long rawDistanceSquared = dx * dx + dy * dy + dz * dz;
-            distanceF32 = UnitMover.IntSqrt(rawDistanceSquared);
-            long distanceSquaredF32 = rawDistanceSquared >> 8;
-            long rangeSquaredF32 = ((long)allowedRangeF32 * allowedRangeF32) >> 8;
-            return distanceSquaredF32 <= rangeSquaredF32;
+            return Combat.CombatRuntime.Instance.EvaluateUseTargetInitialRangeFixed3D(
+                actorFixedX, actorFixedY, actorFixedZ,
+                posFixedX, posFixedY, posFixedZ,
+                spell.InitUseRangeF32, spell.ClientSyncToleranceF32,
+                conn.UnitFollowClientClientControlEnabled,
+                out distanceF32, out _, out _);
         }
 
         private Combat.Monster ResolvePositionSpellTargetFixed(RRConnection conn, Combat.SpellData spell, int posFixedX, int posFixedY, out int projectileHitDistanceF32)
@@ -1793,7 +1794,7 @@ public partial class GameServer
                 }
         }
 
-        private void HandleSpellAttack(RRConnection conn, PlayerState state, Combat.Monster monster, byte manipulatorId, byte useFlags, string sourceTag = null, bool monsterOnAttackedAlreadyAdmitted = false, bool activeSkillUseCommitted = false)
+        private void HandleSpellAttack(RRConnection conn, PlayerState state, Combat.Monster monster, byte manipulatorId, byte useFlags, string sourceTag = null, bool monsterOnAttackedAlreadyAdmitted = false, bool activeSkillUseCommitted = false, bool usePositionProjectileImpact = false)
         {
             Combat.SpellDatabase.Initialize();
             var spell = ResolveSpellFromManip(conn, manipulatorId);
@@ -1802,7 +1803,10 @@ public partial class GameServer
                 Debug.LogError($"[SPELL] No spell found for manipId={manipulatorId} class={state.ClassName}");
                 return;
             }
-            if (!Combat.SpellDatabase.TryValidatePlayerPveTargetRuntime(spell, out string targetRuntimeReason))
+            bool runtimeSupported = usePositionProjectileImpact
+                ? Combat.SpellDatabase.TryValidatePlayerUsePositionRuntime(spell, out string targetRuntimeReason)
+                : Combat.SpellDatabase.TryValidatePlayerPveTargetRuntime(spell, out targetRuntimeReason);
+            if (!runtimeSupported)
             {
                 SkillEffectTracker.RecordPlayerGraph(conn?.Avatar != null ? (uint)conn.Avatar.Id : 0u, monster?.EntityId ?? 0u, spell.SkillId, spell.TargetType, spell.OrderedEffects?.Count ?? 0, "rejected", targetRuntimeReason, _combatTick);
                 Debug.LogError($"[SKILL-USE] action=effect state=blocked reason={targetRuntimeReason ?? "unsupported-player-pve-target-effect"} manipId={manipulatorId} spell={spell.SkillId ?? "UNKNOWN"} sourceFunction=ActiveSkill::doSkillEffect@0x00539630");

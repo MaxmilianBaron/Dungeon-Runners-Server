@@ -362,9 +362,6 @@ namespace DungeonRunners.Networking
             if (zoneName.StartsWith("elite")) return true;
             if (zoneName.StartsWith("epic")) return true;
             if (zoneName.StartsWith("squeakeasy")) return true;
-            if (zoneName.StartsWith("deathmatch")) return true;
-            if (zoneName.StartsWith("pvpgroup")) return true;
-            if (zoneName.StartsWith("pvpduel")) return true;
 
             return false;
         }
@@ -1933,15 +1930,17 @@ namespace DungeonRunners.Networking
                 }
             }
             int rating;
+            byte ratingFraction;
             try
             {
                 var dbChar = GetActiveCharacter(conn);
-                if (dbChar == null || dbChar.id != charSqlId || dbChar.pvpRating < 0 || dbChar.pvpRating > 3000)
+                if (dbChar == null || dbChar.id != charSqlId || dbChar.pvpRating < SavedCharacter.MinPvpRating || dbChar.pvpRating > SavedCharacter.MaxPvpRating)
                 {
                     Debug.LogError($"[PVP] Could not load an exact valid PvP rating for {conn.LoginName}");
                     return;
                 }
                 rating = dbChar.pvpRating;
+                ratingFraction = dbChar.pvpRatingFraction;
             }
             catch (Exception ex)
             {
@@ -1953,7 +1952,7 @@ namespace DungeonRunners.Networking
                 ? "grp:" + pvpGroup.GroupId
                 : "solo:" + conn.LoginName;
             bool ok = Gameplay.PVPMatchmaking.Instance.EnqueuePlayer(
-                conn.LoginName, charSqlId, archetype, rating, teamKey, _combatTick);
+                conn.LoginName, charSqlId, archetype, rating, teamKey, _combatTick, ratingFraction);
 
             if (!ok)
             {
@@ -2159,9 +2158,11 @@ namespace DungeonRunners.Networking
                 Gameplay.PVPMatchmaking.Instance.BeginSetupPhase(match.MatchId, _combatTick);
         }
 
-        private static void WritePVPTeamScore(LEWriter w, string teamGcPath)
+        private static void WritePVPTeamScore(LEWriter w, string teamGcPath, Gameplay.PvpTeamRatingParameters rating)
         {
-            for (int i = 0; i < 6; i++) w.WriteUInt32(0);
+            for (int i = 0; i < 4; i++) w.WriteUInt32(0);
+            w.WriteInt32(rating.WeightFixed32);
+            w.WriteInt32(rating.ExpectedPercentFixed32);
             w.WriteByte(0x00); w.WriteByte(0x00); w.WriteByte(0x00);
             w.WriteByte(0xFF); w.WriteCString(teamGcPath);
         }
@@ -2244,7 +2245,7 @@ namespace DungeonRunners.Networking
             int rewardWidth = 0;
             int rewardHeight = 0;
             int rewardRarity = -1;
-            if (match.HasWinner && isRanked)
+            if ((match.HasWinner || match.IsScoredDraw) && isRanked)
             {
                 rewardGcClass = "QuestItemPAL.Token";
                 var rewardDimensions = Gameplay.MerchantRuntime.GetItemDimensions(rewardGcClass);
@@ -2266,18 +2267,14 @@ namespace DungeonRunners.Networking
                 if (baseline == null || baseline.id != characterId)
                     return false;
                 bool isWinner = match.IsWinner(login);
-                int preMatchRating = match.ParticipantRatings.TryGetValue(login, out var mr) ? mr : 1500;
-                int newRating = preMatchRating;
-                bool applyRating = match.HasWinner && isRanked;
+                int preMatchRatingFixed32 = match.GetRatingBeforeFixed32(login);
+                int newRatingFixed32 = preMatchRatingFixed32;
+                bool applyRating = match.TryGetRatingOutcomePercentFixed32(login, out int ratingOutcome);
                 if (applyRating)
-                {
-                    var opponentRatings = match.GetOpponentLogins(login)
-                        .Select(p => match.ParticipantRatings.TryGetValue(p, out var or) ? or : 1500)
-                        .ToList();
-                    int ratingDelta = Gameplay.PVPMatchmaking.EloDelta(preMatchRating, opponentRatings, isWinner ? 1.0 : 0.0);
-                    newRating = System.Math.Max(0, System.Math.Min(3000, preMatchRating + ratingDelta));
-                }
-                int rewardCount = match.HasWinner && isRanked ? (isWinner ? 10 : 5) : 0;
+                    newRatingFixed32 = unchecked(preMatchRatingFixed32
+                        + match.GetTeamRatingParameters(login).GetDeltaFixed32(ratingOutcome));
+                bool isDraw = applyRating && ratingOutcome == 0x3200;
+                int rewardCount = (match.HasWinner || isDraw) && isRanked && !match.IsForfeited(login) ? (isWinner || isDraw ? 10 : 5) : 0;
                 participants.Add(new PvpParticipantResult
                 {
                     ResultId = match.ResultId,
@@ -2289,12 +2286,17 @@ namespace DungeonRunners.Networking
                     LoginName = login,
                     IsWinner = isWinner,
                     IsRanked = isRanked,
-                    RatingBefore = preMatchRating,
-                    RatingAfter = newRating,
+                    RatingBefore = preMatchRatingFixed32 >> 8,
+                    RatingAfter = newRatingFixed32 >> 8,
                     PersistedRatingBefore = baseline.pvpRating,
+                    RatingBeforeFraction = unchecked((byte)preMatchRatingFixed32),
+                    RatingAfterFraction = unchecked((byte)newRatingFixed32),
+                    PersistedRatingBeforeFraction = baseline.pvpRatingFraction,
+                    RatingOutcomePercentFixed32 = applyRating ? ratingOutcome : null,
                     ApplyRating = applyRating,
                     WinsBefore = baseline.pvpWins,
-                    WinsDelta = isWinner ? 1 : 0,
+                    ResultContractVersion = 1,
+                    WinsDelta = applyRating && (isWinner || isDraw) ? 1 : 0,
                     RewardGcClass = rewardCount > 0 ? rewardGcClass : string.Empty,
                     RewardCount = rewardCount,
                     RewardWidth = rewardCount > 0 ? rewardWidth : 0,
@@ -2351,7 +2353,8 @@ namespace DungeonRunners.Networking
                     }
                     if (workingCharacter == null
                         || workingCharacter.pvpWins != result.WinsBefore
-                        || workingCharacter.pvpRating != result.PersistedRatingBefore)
+                        || workingCharacter.pvpRating != result.PersistedRatingBefore
+                        || workingCharacter.pvpRatingFraction != result.PersistedRatingBeforeFraction)
                     {
                         allCompleted = false;
                         continue;
@@ -2360,6 +2363,7 @@ namespace DungeonRunners.Networking
                     if (result.ApplyRating)
                     {
                         workingCharacter.pvpRating = result.RatingAfter;
+                        workingCharacter.pvpRatingFraction = result.RatingAfterFraction;
                         workingCharacter.hasPvpRating = true;
                     }
                     workingCharacter.currentZoneName = result.ReturnZone;
@@ -3069,10 +3073,6 @@ namespace DungeonRunners.Networking
                 {
                     Debug.Log("ZoneEnter confirmation (0x01) - client successfully entered zone");
                 }
-                else if (type == 0x08)
-                {
-                    Debug.Log("IGNORING 13/8 message - do not acknowledge to prevent crashes");
-                }
                 else
                 {
                     Debug.LogWarning($"Unknown zone channel message type: 0x{type:X2}");
@@ -3479,9 +3479,6 @@ namespace DungeonRunners.Networking
                 case 3: savedChar.statIntellect += numPoints; break;
             }
 
-            PlayerState playerState = GetPlayerState(conn.ConnId.ToString());
-            playerState.ApplyAllocatedStats(savedChar.statStrength, savedChar.statAgility, savedChar.statEndurance, savedChar.statIntellect);
-            RecalculateHotbarPassiveBonuses(conn, savedChar, sendModifiers: false);
             if (!TrySaveCharacterForConn(conn, savedChar, "stat-spend"))
             {
                 switch (statType)
@@ -3491,12 +3488,10 @@ namespace DungeonRunners.Networking
                     case 2: savedChar.statEndurance -= numPoints; break;
                     case 3: savedChar.statIntellect -= numPoints; break;
                 }
-                playerState.ApplyAllocatedStats(savedChar.statStrength, savedChar.statAgility, savedChar.statEndurance, savedChar.statIntellect);
-                RecalculateHotbarPassiveBonuses(conn, savedChar, sendModifiers: false);
                 return;
             }
             Debug.LogError($"[STAT-SPEND] STR={savedChar.statStrength} AGI={savedChar.statAgility} END={savedChar.statEndurance} INT={savedChar.statIntellect} pts={remaining - numPoints}");
-            SendHeroStatUpdate(conn, 0x11, numPoints, statType);
+            SendHeroStatUpdate(conn, 0x11, numPoints, statType, savedChar);
         }
 
         private void HandleStatReturnRequest(RRConnection conn, LEReader reader)
@@ -3536,13 +3531,7 @@ namespace DungeonRunners.Networking
                 return;
             }
             Debug.LogError($"[STAT-RETURN] STR={savedChar.statStrength} AGI={savedChar.statAgility} END={savedChar.statEndurance} INT={savedChar.statIntellect}");
-            PlayerState playerState = GetPlayerState(conn.ConnId.ToString());
-            uint oldMaxWire = playerState.MaxHPWire;
-            playerState.ApplyAllocatedStats(savedChar.statStrength, savedChar.statAgility, savedChar.statEndurance, savedChar.statIntellect);
-            RecalculateHotbarPassiveBonuses(conn, savedChar, sendModifiers: false);
-            if (playerState.MaxHPWire < oldMaxWire && playerState.CurrentHPWire > playerState.MaxHPWire)
-                playerState.BeginPassiveMaxTransition(oldMaxWire);
-            SendHeroStatUpdate(conn, 0x12, numPoints, statType);
+            SendHeroStatUpdate(conn, 0x12, numPoints, statType, savedChar);
         }
 
         private List<(int level, int fx32Value)> _respecCostCurveFx;
@@ -3716,16 +3705,14 @@ namespace DungeonRunners.Networking
             Debug.LogError($"[RESPEC] Sent respec packet, avatar={avatarId}");
         }
 
-        private void SendHeroStatUpdate(RRConnection conn, byte subType, byte numPoints, byte statType)
+        private void SendHeroStatUpdate(RRConnection conn, byte subType, byte numPoints, byte statType, SavedCharacter savedChar)
         {
             uint avatarId = GetPlayerAvatarId(conn.LoginName);
             if (avatarId == 0) return;
 
-            PlayerState playerState = GetPlayerState(conn.ConnId.ToString());
-            uint capturedHPWire = playerState != null ? playerState.EntitySynchInfoHP : 0;
-            uint capturedSimulationTick = _combatTick;
-            conn.MessageQueue.EnqueueDeferred(() => BuildHeroStatUpdate(conn, (ushort)avatarId, subType, numPoints, statType, capturedHPWire, capturedSimulationTick));
-            Debug.LogError($"[STAT-UPDATE] Queued 0x03 sub=0x{subType:X2} pts={numPoints} stat={statType} avatar={avatarId} hp={capturedHPWire} captureTick={capturedSimulationTick}");
+            QueueHeroStatInput(conn, (ushort)avatarId, subType, statType, numPoints, savedChar);
+            conn.MessageQueue.EnqueueDeferred(() => BuildHeroStatUpdate(conn, (ushort)avatarId, subType, numPoints, statType), role: ClientEntityMessageRole.OwnerHeroStatUpdate);
+            Debug.LogError($"[STAT-UPDATE] Queued 0x03 sub=0x{subType:X2} pts={numPoints} stat={statType} avatar={avatarId}");
 
             foreach (RRConnection viewer in GetConnectionInsertionOrderSnapshot())
             {
@@ -3740,12 +3727,12 @@ namespace DungeonRunners.Networking
 
                 RRConnection capturedViewer = viewer;
                 ushort capturedRemoteAvatarId = remoteAvatarId;
-                capturedViewer.MessageQueue.EnqueueDeferred(() => BuildRemoteHeroStatUpdate(conn, capturedViewer, capturedRemoteAvatarId, subType, numPoints, statType, capturedHPWire, capturedSimulationTick, (ushort)avatarId));
-                Debug.LogError($"[STAT-UPDATE] Queued remote 0x03 sub=0x{subType:X2} pts={numPoints} stat={statType} avatar={remoteAvatarId} hp={capturedHPWire} captureTick={capturedSimulationTick} source={conn.LoginName} viewer={viewer.LoginName}");
+                capturedViewer.MessageQueue.EnqueueDeferred(() => BuildRemoteHeroStatUpdate(conn, capturedViewer, capturedRemoteAvatarId, subType, numPoints, statType, (ushort)avatarId));
+                Debug.LogError($"[STAT-UPDATE] Queued remote 0x03 sub=0x{subType:X2} pts={numPoints} stat={statType} avatar={remoteAvatarId} source={conn.LoginName} viewer={viewer.LoginName}");
             }
         }
 
-        private byte[] BuildHeroStatUpdate(RRConnection conn, ushort avatarId, byte subType, byte numPoints, byte statType, uint capturedHPWire, uint capturedSimulationTick)
+        private byte[] BuildHeroStatUpdate(RRConnection conn, ushort avatarId, byte subType, byte numPoints, byte statType)
         {
             if (conn == null || !conn.IsConnected || avatarId == 0)
                 return Array.Empty<byte>();
@@ -3753,15 +3740,19 @@ namespace DungeonRunners.Networking
             writer.WriteByte(0x03);
             writer.WriteUInt16(avatarId);
             writer.WriteByte(subType);
-            writer.WriteByte(statType);
-            writer.WriteByte(numPoints);
+            if (subType != 0x13)
+            {
+                writer.WriteByte(statType);
+                writer.WriteByte(numPoints);
+            }
+            uint capturedHPWire = GetPlayerState(conn.ConnId.ToString()).EntitySynchInfoHP;
             if (!TryWriteCapturedPlayerEntitySynchInfo(conn, writer, avatarId, capturedHPWire, "STAT-UPDATE"))
                 return Array.Empty<byte>();
-            Debug.LogError($"[STAT-UPDATE] Built 0x03 sub=0x{subType:X2} pts={numPoints} stat={statType} avatar={avatarId} hp={capturedHPWire} captureTick={capturedSimulationTick} tick={_combatTick}");
+            Debug.LogError($"[STAT-UPDATE] Built 0x03 sub=0x{subType:X2} pts={numPoints} stat={statType} avatar={avatarId} hp={capturedHPWire} tick={_combatTick}");
             return writer.ToArray();
         }
 
-        private byte[] BuildRemoteHeroStatUpdate(RRConnection source, RRConnection viewer, ushort remoteAvatarId, byte subType, byte numPoints, byte statType, uint capturedHPWire, uint capturedSimulationTick, ushort sourceAvatarId)
+        private byte[] BuildRemoteHeroStatUpdate(RRConnection source, RRConnection viewer, ushort remoteAvatarId, byte subType, byte numPoints, byte statType, ushort sourceAvatarId)
         {
             if (source == null || viewer == null || !source.IsConnected || !viewer.IsConnected || remoteAvatarId == 0)
                 return Array.Empty<byte>();
@@ -3769,15 +3760,19 @@ namespace DungeonRunners.Networking
             writer.WriteByte(0x03);
             writer.WriteUInt16(remoteAvatarId);
             writer.WriteByte(subType);
-            writer.WriteByte(statType);
-            writer.WriteByte(numPoints);
+            if (subType != 0x13)
+            {
+                writer.WriteByte(statType);
+                writer.WriteByte(numPoints);
+            }
+            uint capturedHPWire = GetPlayerState(source.ConnId.ToString()).EntitySynchInfoHP;
             if (!TryWriteCapturedPlayerEntitySynchInfo(source, writer, sourceAvatarId, capturedHPWire, "MP-STAT"))
                 return Array.Empty<byte>();
-            Debug.LogError($"[STAT-UPDATE] Built remote 0x03 sub=0x{subType:X2} pts={numPoints} stat={statType} avatar={remoteAvatarId} hp={capturedHPWire} captureTick={capturedSimulationTick} source={source.LoginName} viewer={viewer.LoginName} tick={_combatTick}");
+            Debug.LogError($"[STAT-UPDATE] Built remote 0x03 sub=0x{subType:X2} pts={numPoints} stat={statType} avatar={remoteAvatarId} hp={capturedHPWire} source={source.LoginName} viewer={viewer.LoginName} tick={_combatTick}");
             return writer.ToArray();
         }
 
-        private void HandleClientRequestRespawn(RRConnection conn)
+        private void HandleClientRequestRespawn(RRConnection conn, bool zoneErrorTransfer = false)
         {
             Debug.LogError($"[RESPAWN] HandleClientRequestRespawn for {conn?.LoginName ?? ""}");
 
@@ -3792,9 +3787,16 @@ namespace DungeonRunners.Networking
                 CombatPlayer combatPlayer = conn.Avatar != null && conn.Avatar.Id > 0
                     ? CombatRuntime.Instance.GetPlayer((uint)conn.Avatar.Id)
                     : null;
-                if (playerState.CurrentHPWire != 0 || (combatPlayer != null && combatPlayer.IsAlive))
+                bool restoreFullHealth = playerState.CurrentHPWire == 0 && combatPlayer != null && !combatPlayer.IsAlive;
+                if (!restoreFullHealth && (!zoneErrorTransfer || playerState.CurrentHPWire == 0 || combatPlayer?.IsAlive != true))
                 {
                     Debug.LogError($"[RESPAWN] state=blocked reason=player-alive hp={playerState.CurrentHPWire} combatAlive={combatPlayer?.IsAlive}");
+                    return;
+                }
+
+                if (zoneErrorTransfer && !restoreFullHealth && conn.CompletedZoneErrorRespawnAddress == conn.ZoneSourceAddressId)
+                {
+                    Debug.LogError("[RESPAWN] state=ignored reason=zone-error-recovery-already-committed");
                     return;
                 }
 
@@ -3830,7 +3832,7 @@ namespace DungeonRunners.Networking
                         pvpDestination.Zone.name,
                         pvpDestination.SpawnPoint,
                         (uint)match.InstanceId,
-                        restoreFullHealth: true,
+                        restoreFullHealth: restoreFullHealth,
                         exactSpawnFixedX: pvpDestination.PosFixedX,
                         exactSpawnFixedY: pvpDestination.PosFixedY,
                         exactSpawnFixedZ: pvpDestination.PosFixedZ,
@@ -3841,6 +3843,8 @@ namespace DungeonRunners.Networking
                             Debug.LogError($"[RESPAWN-TRACK] phase=persist result=blocked characterId={GetCharSqlId(conn)} mode=pvp sourceZone='{pvpSourceZone}' sourceInstance='{pvpSourceInstance}' targetZone='{pvpDestination.Zone.name}' targetInstance={match.InstanceId:X8} spawnPoint='{pvpDestination.SpawnPoint}' reason=persist-failed hp={playerState.CurrentHPWire} alive={combatPlayer?.IsAlive}");
                         return;
                     }
+                    if (zoneErrorTransfer)
+                        conn.CompletedZoneErrorRespawnAddress = conn.ZoneSourceAddressId;
                     Debug.LogError($"[RESPAWN] mode=pvp match={match.MatchId} zone={pvpDestination.Zone.name}#{match.InstanceId} entry={pvpDestination.SpawnPoint} fixed=({pvpDestination.PosFixedX},{pvpDestination.PosFixedY},{pvpDestination.PosFixedZ}) headingFixed={pvpDestination.HeadingFixed} hp={playerState.CurrentHPWire} mana={playerState.CurrentManaWire}");
                     if (RespawnTracking)
                         Debug.LogError($"[RESPAWN-TRACK] phase=commit characterId={GetCharSqlId(conn)} mode=pvp sourceZone='{pvpSourceZone}' sourceInstance='{pvpSourceInstance}' targetZone='{pvpDestination.Zone.name}' targetInstance={match.InstanceId:X8} spawnPoint='{pvpDestination.SpawnPoint}' fixed=({pvpDestination.PosFixedX},{pvpDestination.PosFixedY},{pvpDestination.PosFixedZ}) headingFixed={pvpDestination.HeadingFixed} pathMap=walkable hp={playerState.CurrentHPWire} alive={combatPlayer?.IsAlive}");
@@ -3873,7 +3877,7 @@ namespace DungeonRunners.Networking
                     conn,
                     destination.Zone.name,
                     destination.SpawnPoint,
-                    restoreFullHealth: true,
+                    restoreFullHealth: restoreFullHealth,
                     exactSpawnFixedX: destination.PosFixedX,
                     exactSpawnFixedY: destination.PosFixedY,
                     exactSpawnFixedZ: destination.PosFixedZ,
@@ -3884,6 +3888,8 @@ namespace DungeonRunners.Networking
                         Debug.LogError($"[RESPAWN-TRACK] phase=persist result=blocked characterId={GetCharSqlId(conn)} mode=pve sourceGc='{sourceGcType}' sourceZone='{sourceZone}' sourceInstance='{sourceInstance}' targetZone='{destination.Zone.name}' spawnPoint='{destination.SpawnPoint}' reason=persist-failed hp={playerState.CurrentHPWire} alive={combatPlayer?.IsAlive}");
                     return;
                 }
+                if (zoneErrorTransfer)
+                    conn.CompletedZoneErrorRespawnAddress = conn.ZoneSourceAddressId;
                 Debug.LogError($"[RESPAWN] {sourceGcType} -> {destination.Zone.name} spawnPoint='{destination.SpawnPoint}' fixed=({destination.PosFixedX},{destination.PosFixedY},{destination.PosFixedZ}) headingFixed={destination.HeadingFixed} hp={playerState.CurrentHPWire} mana={playerState.CurrentManaWire}");
                 if (RespawnTracking)
                     Debug.LogError($"[RESPAWN-TRACK] phase=commit characterId={GetCharSqlId(conn)} mode=pve sourceGc='{sourceGcType}' sourceZone='{sourceZone}' sourceInstance='{sourceInstance}' targetZone='{destination.Zone.name}' spawnPoint='{destination.SpawnPoint}' fixed=({destination.PosFixedX},{destination.PosFixedY},{destination.PosFixedZ}) headingFixed={destination.HeadingFixed} pathMap=walkable hp={playerState.CurrentHPWire} alive={combatPlayer?.IsAlive}");
@@ -4141,7 +4147,10 @@ namespace DungeonRunners.Networking
             writer.WriteUInt16((ushort)(remoteChar?.statAgility ?? 0));
             writer.WriteUInt16((ushort)(remoteChar?.statEndurance ?? 0));
             writer.WriteUInt16((ushort)(remoteChar?.statIntellect ?? 0));
-            writer.WriteUInt16(0);
+            int allocated = (remoteChar?.statStrength ?? 0) + (remoteChar?.statAgility ?? 0)
+                + (remoteChar?.statEndurance ?? 0) + (remoteChar?.statIntellect ?? 0);
+            int remaining = Math.Max(0, (remoteState.Level - 1) * StatPointsPerLevel - allocated);
+            writer.WriteUInt16(checked((ushort)remaining));
             writer.WriteUInt16(0);
             WriteHeroPvpFields(writer, remoteChar);
             writer.WriteByte(remoteChar?.face ?? 0);
@@ -4231,17 +4240,33 @@ namespace DungeonRunners.Networking
                 if (!behaviorMap.TryGetValue(sourceConn.LoginName, out ushort remoteBehaviorId) || remoteBehaviorId == 0) continue;
                 string key = RemoteAvatarResourceKey(viewerConn.LoginName, sourceConn.LoginName);
                 if (_remoteAvatarHPSent.TryGetValue(key, out uint lastHp) && lastHp == hpWire) continue;
-                var writer = new LEWriter();
-                writer.WriteByte(0x35);
-                writer.WriteUInt16(remoteBehaviorId);
-                writer.WriteByte(0x65);
-                writer.WriteByte(0xFF);
-                writer.WriteByte(0x00);
-                if (!TryWriteRemoteAvatarEntitySynchInfo(sourceConn, writer, remoteBehaviorId, 0x65, "MP-HP"))
-                    continue;
-                viewerConn.MessageQueue.Enqueue(writer.ToArray());
+                string instanceKey = ResolveConnectionInstanceKey(sourceConn);
+                viewerConn.MessageQueue.EnqueueDeferred(
+                    () => BuildRemoteAvatarHPUpdate(viewerConn, sourceConn, remoteBehaviorId, instanceKey),
+                    componentId: remoteBehaviorId);
                 _remoteAvatarHPSent[key] = hpWire;
             }
+        }
+
+        private byte[] BuildRemoteAvatarHPUpdate(RRConnection viewerConn, RRConnection sourceConn, ushort remoteBehaviorId, string instanceKey)
+        {
+            if (!IsPendingConnectionInstanceCurrent(viewerConn, instanceKey)
+                || !IsPendingConnectionInstanceCurrent(sourceConn, instanceKey)
+                || GetConnectionByConnId(viewerConn.ConnId) != viewerConn
+                || GetConnectionByConnId(sourceConn.ConnId) != sourceConn
+                || !_remoteBehaviorIds.TryGetValue(viewerConn.LoginName, out var behaviorMap)
+                || !behaviorMap.TryGetValue(sourceConn.LoginName, out ushort currentBehaviorId)
+                || currentBehaviorId != remoteBehaviorId)
+                return Array.Empty<byte>();
+            var writer = new LEWriter();
+            writer.WriteByte(0x35);
+            writer.WriteUInt16(remoteBehaviorId);
+            writer.WriteByte(0x65);
+            writer.WriteByte(0xFF);
+            writer.WriteByte(0x00);
+            return TryWriteRemoteAvatarEntitySynchInfo(sourceConn, writer, remoteBehaviorId, 0x65, "MP-HP")
+                ? writer.ToArray()
+                : Array.Empty<byte>();
         }
 
         private byte[] BuildOtherPlayerSpawnPacket(RRConnection playerConn, uint avatarEntityId, RRConnection viewerConn)
@@ -4308,7 +4333,7 @@ namespace DungeonRunners.Networking
 
             var skillItems = new List<GCObject>();
             var equipmentItems = new List<GCObject>();
-            var remotePassives = (remoteChar != null && !IsPvpZone(playerConn.CurrentZoneName))
+            var remotePassives = remoteChar != null
                 ? CollectPassiveManipulators(remoteChar)
                 : new List<PassiveManipulator>();
             string playerConnectionKey = playerConn.ConnId.ToString();
@@ -4404,7 +4429,10 @@ namespace DungeonRunners.Networking
 
             writer = new LEWriter();
             writer.WriteByte(0x07);
-            ClientEntityRootSnapshot.WriteRoots(writer, new[] { avatarSnapshot, playerSnapshot });
+            if (remotePvpMatch != null)
+                ClientEntityRootSnapshot.WritePlayerAvatarRoots(writer, avatarSnapshot, playerSnapshot);
+            else
+                ClientEntityRootSnapshot.WriteRoots(writer, new[] { avatarSnapshot, playerSnapshot });
             if (writer.Aborted)
                 return null;
             if (!WriteRemotePassiveModifierAdds(writer, playerConn, remoteModId, remotePassives))
@@ -4420,7 +4448,7 @@ namespace DungeonRunners.Networking
             writer.WriteInt32(posX);
             writer.WriteInt32(posY);
             writer.WriteInt32(posZ);
-            writer.WriteUInt16((ushort)avatarEntityId);
+            writer.WriteUInt16(0);
             GetValidationCutoff(out uint spawnCutoffTick);
             if (!TryWriteResolvedEntitySynchInfo(writer, remoteBehaviorId, 0x04, EntitySynchInfoContext.PlayerActionResponse, "MP-SPAWN-ACTION", EntitySynchInfoDecision.HP(EntitySynchInfoOwner.Avatar, remoteHPWire, $"MP-SPAWN-ACTION source={playerConn.LoginName}", remoteBehaviorId, remoteBehaviorId, 0x04, $"remote-spawn-action; validationCutoffTick={spawnCutoffTick}", spawnCutoffTick)))
                 return null;
@@ -5354,7 +5382,7 @@ namespace DungeonRunners.Networking
                                     freshChar.equipment.slotRarity.TryGetValue(eqSlotNames[eqIdx], out int eqRar)) ? eqRar : -1,
                                 StoredLevel = (freshChar.equipment.slotLevel != null &&
                                     freshChar.equipment.slotLevel.TryGetValue(eqSlotNames[eqIdx], out int eqLvl)) ? eqLvl : -1,
-                                TargetSlot = (eqSlotNames[eqIdx] == "shield" && (dfcClass == "MeleeWeapon" || dfcClass == "RangedWeapon")) ? (uint?)11 : null
+                                TargetSlot = eqSlotNames[eqIdx] == "ring2" ? (uint?)4 : (eqSlotNames[eqIdx] == "shield" && (dfcClass == "MeleeWeapon" || dfcClass == "RangedWeapon")) ? (uint?)11 : null
                             };
                             if (freshChar.equipment.slotItemState != null &&
                                 freshChar.equipment.slotItemState.TryGetValue(eqSlotNames[eqIdx], out SavedItemRuntimeState freshItemState) &&
@@ -6761,7 +6789,10 @@ namespace DungeonRunners.Networking
                 Debug.LogError("[OP11] state=complete");
                 writer = new LEWriter();
                 writer.WriteByte(0x07);
-                ClientEntityRootSnapshot.WriteRoots(writer, new[] { avatarSnapshot, playerSnapshot });
+                if (selfPvpMatch != null)
+                    ClientEntityRootSnapshot.WritePlayerAvatarRoots(writer, avatarSnapshot, playerSnapshot);
+                else
+                    ClientEntityRootSnapshot.WriteRoots(writer, new[] { avatarSnapshot, playerSnapshot });
                 if (writer.Aborted)
                     return;
                 Debug.LogError($"[SPAWN-SERIALIZE] packetBytesBeforeEndStream={writer.Position}");
@@ -6903,7 +6934,7 @@ namespace DungeonRunners.Networking
                     followWriter.WriteInt32(spawnFixedX);
                     followWriter.WriteInt32(spawnFixedY);
                     followWriter.WriteInt32(spawnFixedZ);
-                    followWriter.WriteUInt16((ushort)avatar.Id);
+                    followWriter.WriteUInt16(0);
 
                     int spawnSynchPos = followWriter.Position;
                     Debug.LogError($"[SPAWN-ENTITY-SYNCH] Position before 0x02: {spawnSynchPos}");
@@ -7203,7 +7234,7 @@ namespace DungeonRunners.Networking
                 writer.WriteUInt24((int)MSG_DEST);
                 writer.WriteUInt24(compressedLen);
                 writer.WriteByte(0x00);
-                writer.WriteUInt24((int)MSG_SOURCE);
+                writer.WriteUInt24((int)ResolveServerMessageSourceAddress(conn, 0x01, 0x0F, innerData));
                 writer.WriteByte(0x01);
                 writer.WriteByte(0x00);
                 writer.WriteByte(0x01);
@@ -7275,9 +7306,7 @@ namespace DungeonRunners.Networking
                 writer.WriteByte(0x0A);
                 writer.WriteUInt24((int)(peer & 0xFFFFFFu));
                 writer.WriteUInt32((uint)(compressed.Length + 7));
-                writer.WriteByte(dest);
-                writer.WriteByte(messageType);
-                writer.WriteByte(0x00);
+                writer.WriteUInt24((int)ResolveServerMessageSourceAddress(conn, dest, messageType, innerData));
                 writer.WriteUInt32((uint)innerData.Length);
                 writer.WriteBytes(compressed);
                 byte[] data = writer.ToArray();
@@ -7292,6 +7321,16 @@ namespace DungeonRunners.Networking
                 Debug.LogError($"[SEND-COMPRESSED-A] state=failed message='{ex.Message}'");
                 return false;
             }
+        }
+
+        private static uint ResolveServerMessageSourceAddress(RRConnection conn, byte node, byte addressId, byte[] innerData)
+        {
+            ushort sourceId = addressId;
+            if (conn != null && node == 0x01 && addressId == 0x0F
+                && innerData != null && innerData.Length > 0
+                && (innerData[0] == 0x07 || innerData[0] == 0x0D))
+                sourceId = conn.ZoneSourceAddressId;
+            return (uint)(node | sourceId << 8);
         }
 
         private static bool IsLiveQueueableClientEntityStream(RRConnection conn, byte dest, byte messageType, byte[] innerData)

@@ -50,6 +50,16 @@ namespace DungeonRunners.Combat
             return ProjectileFlightTicksFixed32(distanceF32, speedF32);
         }
 
+        internal static int ProjectileDescriptorLifetimeTicks(int rangeF32, int speedF32)
+        {
+            int descriptorSpeed = unchecked((byte)(speedF32 >> 8));
+            if (descriptorSpeed == 0)
+                return 0;
+            int stepFixed8 = (descriptorSpeed << 16) / (30 << 8);
+            long rangeFixed16 = (long)unchecked((ushort)(rangeF32 >> 8)) << 16;
+            return unchecked((ushort)((rangeFixed16 / stepFixed8) >> 8));
+        }
+
         public static int ProjectileStepDistanceF32(int speedF32)
         {
             int safeSpeedF32 = Math.Max(0x100, speedF32);

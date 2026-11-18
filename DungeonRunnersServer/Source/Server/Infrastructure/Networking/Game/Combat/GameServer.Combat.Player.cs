@@ -334,30 +334,15 @@ public partial class GameServer
             RecalculateHotbarPassiveBonuses(conn, savedChar, sendModifiers: false);
         }
 
-        private void RecalculateHotbarPassiveBonuses(RRConnection conn, SavedCharacter savedChar, bool sendModifiers = true, bool keepPvpPassive = false)
+        private void RecalculateHotbarPassiveBonuses(RRConnection conn, SavedCharacter savedChar, bool sendModifiers = true)
         {
             List<PassiveManipulator> passives = CollectPassiveManipulators(savedChar);
-            RecalculateHotbarPassiveBonuses(conn, savedChar, passives, sendModifiers, keepPvpPassive);
+            RecalculateHotbarPassiveBonuses(conn, savedChar, passives, sendModifiers);
         }
 
-        private void RecalculateHotbarPassiveBonuses(RRConnection conn, SavedCharacter savedChar, IReadOnlyList<PassiveManipulator> passives, bool sendModifiers, bool keepPvpPassive)
+        private void RecalculateHotbarPassiveBonuses(RRConnection conn, SavedCharacter savedChar, IReadOnlyList<PassiveManipulator> passives, bool sendModifiers)
         {
             if (conn == null) return;
-
-            if (!keepPvpPassive && IsPvpZone(conn.CurrentZoneName))
-            {
-                PlayerState pvpState = GetPlayerState(conn.ConnId.ToString());
-                if (pvpState != null)
-                {
-                    uint baseHpWire = pvpState.MaxHPWireWithoutPassives;
-                    uint remappedHpWire = Gameplay.PvpBalance.RemapMaxHealthWire(baseHpWire, pvpState.Level);
-                    uint currentHpWire = pvpState.CurrentHPWire;
-                    pvpState.SetPvpRemap(remappedHpWire);
-                    pvpState.SetCurrentHP(currentHpWire);
-                    Debug.LogError($"[PVP-BALANCE] {conn.LoginName}: no-passive base maxHP={baseHpWire} remappedMaxHP={pvpState.MaxHPWire} (display={pvpState.MaxHPWire / 256}) level={pvpState.Level} zone={conn.CurrentZoneName}");
-                }
-                return;
-            }
 
             PlayerState playerState = GetPlayerState(conn.ConnId.ToString());
             if (playerState != null && playerState.PvpRemapMaxHpWire > 0 && !IsPvpZone(conn.CurrentZoneName))

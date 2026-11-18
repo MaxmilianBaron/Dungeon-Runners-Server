@@ -651,6 +651,7 @@ public partial class CombatRuntime
                 Id = GetManipulatorByte(manipulator, "ID", 0),
                 RangeF32 = rangeF32,
                 SpellUseRangeF32 = spellUseRangeF32,
+                InitUseRangeF32 = ResolveSkillFixed32(description, manipulator, "InitUseRange", 64000),
                 SpellUseMinimumRangeF32 = hasMinimumRange ? minimumRangeF32 : -1,
                 TargetType = targetType,
                 SpellUse = spellUse,
@@ -672,6 +673,7 @@ public partial class CombatRuntime
                 CastModifier = ResolveSkillString(description, manipulator, "CastModifier", null),
                 InstantUse = ResolveSkillBool(description, manipulator, "InstantUse", false),
                 AddModifierWhileClosing = ResolveSkillBool(description, manipulator, "AddModifierWhileClosing", false),
+                InitUseResetsCooldown = ResolveSkillBool(description, manipulator, "InitUseResetsCooldown", false),
                 IsPrimaryAttack = isPrimaryAttack
             };
         }
@@ -1050,11 +1052,14 @@ public partial class CombatRuntime
             public int[] HitFrames;
             public int[] SoundFrames;
             public bool[] VariantResolved;
+            public int ProjectileSourceOffsetX;
+            public int ProjectileSourceOffsetY;
+            public int ProjectileSourceOffsetZ;
             public ResolutionSource Source;
             public string Reason;
         }
 
-        private AttackTiming ResolveAttackTiming(GCNode authoredDesc, bool weaponUsesProjectile, string source)
+        private AttackTiming ResolveAttackTiming(GCNode authoredDesc, bool weaponUsesProjectile, string source, int projectileAnimationId)
         {
             var timing = new AttackTiming
             {
@@ -1062,6 +1067,7 @@ public partial class CombatRuntime
                 HitFrames = new[] { 0, 0, 0 },
                 SoundFrames = new[] { 0, 0, 0 },
                 VariantResolved = new[] { false, false, false },
+                ProjectileSourceOffsetZ = 0x0c00,
                 Source = ResolutionSource.Blocked,
                 Reason = "unresolved"
             };
@@ -1089,6 +1095,15 @@ public partial class CombatRuntime
                 int id = animation.GetInt("ID", 0);
                 if (id > 0 && !animationById.ContainsKey(id))
                     animationById[id] = animation;
+            }
+
+            if (animationById.TryGetValue(projectileAnimationId, out GCNode projectileAnimation)
+                && SpellDatabase.TryParseSourceOffsetFixed(projectileAnimation, out int offsetX, out int offsetY, out int offsetZ)
+                && (offsetX != 0 || offsetY != 0 || offsetZ != 0))
+            {
+                timing.ProjectileSourceOffsetX = offsetX;
+                timing.ProjectileSourceOffsetY = offsetY;
+                timing.ProjectileSourceOffsetZ = offsetZ;
             }
 
             bool foundAny = false;

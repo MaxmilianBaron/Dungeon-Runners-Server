@@ -133,6 +133,7 @@ namespace DungeonRunners.Combat
         private const byte MONSTER_MOVE_TO_POINT_FOLLOW_REPOSITION = 2;
         private const byte MONSTER_MOVE_TO_POINT_FOLLOW_LINE_OF_SIGHT = 3;
         private const byte MONSTER_MOVE_TO_POINT_RETURN = 4;
+        private const byte MONSTER_MOVE_TO_POINT_USE_TARGET = 5;
         private const int PATH_MANAGER_TOTAL_BUDGET = 100;
         private const int PATH_MANAGER_REQUEST_QUANTUM = 20;
         public struct EntitySynchInfoVisibilityCutoff
@@ -1001,6 +1002,9 @@ namespace DungeonRunners.Combat
                 ClientSimulationPosFixedZ = posFixedZ,
                 UnitFinderMembershipPosFixedX = posFixedX,
                 UnitFinderMembershipPosFixedY = posFixedY,
+                UnitFollowClientPosFixedX = posFixedX,
+                UnitFollowClientPosFixedY = posFixedY,
+                UnitFollowClientPosFixedZ = posFixedZ,
                 OwnerAckFollowClientPosFixedX = posFixedX,
                 OwnerAckFollowClientPosFixedY = posFixedY,
                 OwnerAckFollowClientPosFixedZ = posFixedZ,
@@ -1043,7 +1047,6 @@ namespace DungeonRunners.Combat
                 Debug.LogError($"[COMBAT-LIFECYCLE] player {name}#{entityId} entered instance '{normalizedInstanceKey}'; dropped {droppedCrossInstance} cross-instance monster targets sourceFunction=MonsterBehavior2::UpdateTargets@0x0051CB50 out-of-world-target-watcher");
             if (state != null)
             {
-                state.AnchorEntitySynchInfoHPToTick(_combatTick);
                 state.OnAttributeModifierRemoved -= HandlePlayerAttributeModifierRemoved;
                 state.OnAttributeModifierRemoved += HandlePlayerAttributeModifierRemoved;
             }

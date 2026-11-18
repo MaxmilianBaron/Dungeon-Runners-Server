@@ -6,6 +6,7 @@ using DungeonRunners.Networking.EntitySynchInfo;
 using DungeonRunners.Core;
 using DungeonRunners.Data;
 using DungeonRunners.Combat.Behavior;
+using DungeonRunners.Utilities;
 using System.Linq;
 using System.IO;
 using System.Text;
@@ -57,9 +58,9 @@ public partial class CombatRuntime
         {
             if (monster == null)
                 return;
+            monster.RetiredWanderMoverActive = false;
             monster.MoveInDirectionHeadingInit = false;
             monster.UnitMoverMovingThisFrame = false;
-            monster.ClientVisibleMovingThisFrame = false;
             ClearMonsterMoveToPointPath(monster, 0);
         }
 
@@ -142,7 +143,7 @@ public partial class CombatRuntime
             return SaturatingAddFixed8(
                 SaturatingAddFixed8(
                     SaturatingAddFixed8(Math.Max(0, ResolveUnitBehaviorRadius130F32(monster)), ResolveAvatarCombatRadiusFixed()),
-                    Math.Max(0, monster.UnitDescAttackRangeF32)),
+                    Math.Max(0, monster.FleeRangeF32)),
                 0x4b00);
         }
 
@@ -176,14 +177,10 @@ public partial class CombatRuntime
             fixedY = monster?.PosFixedY ?? 0;
             if (monster == null || !TryGetCombatTarget(monster.TargetId, out CombatTarget target) || target == null || !target.IsAlive)
                 return 0;
-            int headingDegrees = (headingFixed >> 8) % 360;
-            if (headingDegrees < 0)
-                headingDegrees += 360;
-            int directionFixedX = -UnitMover.ZRotateSinFixed(headingDegrees);
-            int directionFixedY = UnitMover.ZRotateCosFixed(headingDegrees);
+            VectorType2D direction = VectorType2D.FromHeading(new Fixed32(headingFixed));
             ResolveSearchForAttackTargetPositionFixed(target, out int targetFixedX, out int targetFixedY, out _);
-            fixedX = targetFixedX + (int)(((long)directionFixedX * distanceFixed) >> 8);
-            fixedY = targetFixedY + (int)(((long)directionFixedY * distanceFixed) >> 8);
+            fixedX = targetFixedX + (int)(((long)direction.X.RawValue * distanceFixed) >> 8);
+            fixedY = targetFixedY + (int)(((long)direction.Y.RawValue * distanceFixed) >> 8);
             return ScoreMonsterAttackPointFixed(monster, fixedX, fixedY, out fixedX, out fixedY);
         }
 
@@ -259,14 +256,10 @@ public partial class CombatRuntime
             fixedY = monster?.PosFixedY ?? 0;
             if (monster == null || !TryGetCombatTarget(monster.TargetId, out CombatTarget target) || target == null || !target.IsAlive)
                 return 0;
-            int headingDegrees = (headingFixed >> 8) % 360;
-            if (headingDegrees < 0)
-                headingDegrees += 360;
-            int directionFixedX = -UnitMover.ZRotateSinFixed(headingDegrees);
-            int directionFixedY = UnitMover.ZRotateCosFixed(headingDegrees);
+            VectorType2D direction = VectorType2D.FromHeading(new Fixed32(headingFixed));
             ResolveMonsterBehaviorTargetPositionFixed(monster, target, out int targetFixedX, out int targetFixedY, out _);
-            int candidateFixedX = targetFixedX + (int)(((long)directionFixedX * distanceFixed) >> 8);
-            int candidateFixedY = targetFixedY + (int)(((long)directionFixedY * distanceFixed) >> 8);
+            int candidateFixedX = targetFixedX + (int)(((long)direction.X.RawValue * distanceFixed) >> 8);
+            int candidateFixedY = targetFixedY + (int)(((long)direction.Y.RawValue * distanceFixed) >> 8);
             fixedX = candidateFixedX;
             fixedY = candidateFixedY;
             string pathMapKey = ResolveMonsterPathMapKey(monster);
@@ -441,6 +434,9 @@ public partial class CombatRuntime
                     || !PassesUnitCollisionBand(scanCollisionBand, scanCollisionPriority, other.CollisionBand, other.CollisionPriority))
                     continue;
 
+                if (!UnitFinderScanContainsMembershipFixed(candidateFixedX, candidateFixedY, scanRadiusFixed, other.PosFixedX, other.PosFixedY))
+                    continue;
+
                 byte otherMoverMode = GetMonsterUnitMoverMode(other);
                 if (ignoreMoving && UnitMover.IsMoving(otherMoverMode))
                     continue;
@@ -485,7 +481,7 @@ public partial class CombatRuntime
             return distanceSquaredFixed <= radiusSquaredFixed;
         }
 
-        private static bool UnitFinderScanContainsMembershipFixed(
+        internal static bool UnitFinderScanContainsMembershipFixed(
             int candidateFixedX,
             int candidateFixedY,
             int scanRadiusFixed,
@@ -545,14 +541,13 @@ public partial class CombatRuntime
             Monster monster = context.Monster;
             uint previousTargetEntityId = monster.TargetId;
             CombatTarget target = FindMonsterBehaviorPrimaryTarget(monster);
-            bool acquired = false;
+            bool admittedScanTarget = target != null;
             if (target != null && previousTargetEntityId == 0)
-                acquired = AggroMonster(monster, target, "UnitFinder2::findEnemies", false, false);
+                admittedScanTarget = AggroMonster(monster, target, "UnitFinder2::findEnemies");
             else if (target != null)
                 monster.TargetId = target.EntityId;
             else if (previousTargetEntityId != 0)
                 TryGetCombatTarget(previousTargetEntityId, out target);
-            bool targetChanged = target != null && target.EntityId != previousTargetEntityId;
             context.TargetPresent = target != null && target.IsAlive;
             if (!context.TargetPresent)
             {
@@ -567,7 +562,7 @@ public partial class CombatRuntime
             long dyFixed = (long)targetFixedY - monsterFixedY;
             context.DistFixed = UnitMover.IntSqrt(dxFixed * dxFixed + dyFixed * dyFixed);
             context.RangeFixed = Math.Max(0, ResolveMonsterEffectiveAttackRangeFixed(context.Monster));
-            return acquired || targetChanged;
+            return admittedScanTarget && target.EntityId != (monster.Behavior?.PrimaryTargetEntityId ?? 0u);
         }
 
         private CombatTarget FindMonsterBehaviorPrimaryTarget(Monster monster)
@@ -593,9 +588,9 @@ public partial class CombatRuntime
                     continue;
                 if (player.CurrentHPWire == 0)
                     continue;
-                long dxFixed = (long)player.ClientSimulationPosFixedX - monsterFixedX;
-                long dyFixed = (long)player.ClientSimulationPosFixedY - monsterFixedY;
-                long dzFixed = (long)player.ClientSimulationPosFixedZ - monsterFixedZ;
+                long dxFixed = (long)player.UnitFollowClientPosFixedX - monsterFixedX;
+                long dyFixed = (long)player.UnitFollowClientPosFixedY - monsterFixedY;
+                long dzFixed = (long)player.UnitFollowClientPosFixedZ - monsterFixedZ;
                 long distanceSquaredFixed8 = ((dxFixed * dxFixed) >> 8)
                     + ((dyFixed * dyFixed) >> 8)
                     + ((dzFixed * dzFixed) >> 8);
@@ -614,7 +609,7 @@ public partial class CombatRuntime
             foreach ((CombatTarget Player, long DistanceSquaredFixed8, int Aggro) candidate in candidates)
             {
                 PathReachability reachability = pathMap != null
-                    ? pathMap.GetReachabilityFixed(monsterFixedX, monsterFixedY, candidate.Player.ClientSimulationPosFixedX, candidate.Player.ClientSimulationPosFixedY)
+                    ? pathMap.GetReachabilityFixed(monsterFixedX, monsterFixedY, candidate.Player.UnitFollowClientPosFixedX, candidate.Player.UnitFollowClientPosFixedY)
                     : PathReachability.Reachable;
                 if (order.Length != 0)
                     order.Append(',');
@@ -739,17 +734,13 @@ public partial class CombatRuntime
             if (monster.DeferredTargetScanMessageReleased)
             {
                 monster.DeferredTargetScanMessageReleased = false;
-                Debug.LogError($"[MON-THREAT-PHASE] entity={monster.EntityId} tick={_combatTick} follow={monster.FollowAdmissionReachable} transition=True phase=post-client-entity-input");
+                Debug.LogError($"[MON-THREAT-PHASE] entity={monster.EntityId} tick={_combatTick} transition=True phase=post-client-entity-input");
                 return true;
             }
-            if (monster.FollowAdmissionReachable && !monster.FollowClientVisible && !monster.FollowInputPending)
-                QueueMonsterFollowBehaviorInput(monster, target);
-            bool transitionClientBehavior = true;
-            PropagateMonsterShout(monster, target, transitionClientBehavior, uint.MaxValue);
-            Debug.LogError($"[MON-THREAT-PHASE] entity={monster.EntityId} tick={_combatTick} follow={monster.FollowAdmissionReachable} transition={transitionClientBehavior} clientScan={monster.ProximityTargetScanMatched} deferred={monster.DeferredTargetScanMessagePending}");
-            monster.ProximityFollowAdmissionPending = false;
+            PropagateMonsterShout(monster, target);
+            Debug.LogError($"[MON-THREAT-PHASE] entity={monster.EntityId} tick={_combatTick} transition=True clientScan={monster.ProximityTargetScanMatched} deferred={monster.DeferredTargetScanMessagePending}");
             monster.ProximityTargetScanMatched = false;
-            return transitionClientBehavior;
+            return true;
         }
 
         public bool ReleaseDeferredMonsterTargetScanMessage(uint monsterEntityId, uint simulationTick)
@@ -884,7 +875,7 @@ public partial class CombatRuntime
             OnMonsterFollowReachedNearStop?.Invoke(monster, target);
         }
 
-        private void QueueMonsterFollowBehaviorInput(Monster monster, CombatTarget target, uint applyTick = uint.MaxValue, uint directPlayerWeaponHitTick = 0, uint playerDamageTick = 0)
+        public void QueueMonsterFollowBehaviorInput(Monster monster, CombatTarget target, uint applyTick = uint.MaxValue, uint directPlayerWeaponHitTick = 0, uint playerDamageTick = 0)
         {
             if (monster == null || target == null)
                 return;
@@ -894,7 +885,8 @@ public partial class CombatRuntime
             monster.FollowInputDirectPlayerWeaponHitTick = directPlayerWeaponHitTick;
             monster.FollowInputPlayerDamageTick = playerDamageTick;
             string applyTickText = applyTick == uint.MaxValue ? "awaiting-packet" : applyTick.ToString();
-            Debug.LogError($"[MON-FOLLOW-INPUT] queued {monster.Name}#{monster.EntityId}->{target.Name} queuedTick={_combatTick} applyTick={applyTickText} directPlayerWeaponHitTick={directPlayerWeaponHitTick} playerDamageTick={playerDamageTick} sourceFunction=MonsterBehavior2::onAttacked@0x0051B550");
+            Debug.LogError($"[MON-FOLLOW-INPUT] queued {monster.Name}#{monster.EntityId}->{target.Name} queuedTick={_combatTick} applyTick={applyTickText} directPlayerWeaponHitTick={directPlayerWeaponHitTick} playerDamageTick={playerDamageTick} sourceFunction=Behavior::processUpdate@0x00515620");
+            OnMonsterFollowRequested?.Invoke(monster, target);
         }
 
         public bool CommitMonsterFollowBehaviorInput(Monster monster, CombatTarget target, uint applyTick)
@@ -914,7 +906,6 @@ public partial class CombatRuntime
                 Debug.LogError($"[MON-FOLLOW-INPUT] rejected {monster.Name}#{monster.EntityId}->{target.Name} applyTick={applyTick} entityTick={_combatTick} currentAction={behavior.CurrentAction} interruptLocked={behavior.CurrentActionInterruptLocked} generation={behavior.ActionGeneration} reason=current-interrupt-locked sourceFunction=ClientEntityManager::processMessage@0x005DA460->Behavior::processUpdate@0x00515620->Behavior::doInterruptLocal@0x00515290");
                 return false;
             }
-            monster.RetiredWanderMoverActive = false;
             WanderSimulator.Instance.UnregisterEntity(monster.EntityId);
             monster.WanderActionTerminationPending = false;
             CancelMonsterPendingAttack(monster, "Behavior::doInterruptLocal-Follow");
@@ -974,14 +965,7 @@ public partial class CombatRuntime
         {
             if (monster == null || !binding.HasValue)
                 return false;
-            MonsterActiveSkillRuntime skill = null;
-            foreach (var entry in monster.ManipulatorOrder)
-            {
-                if (unchecked((uint)GetManipulatorInt(entry.Value, "ID", 0)) != binding.ManipulatorId)
-                    continue;
-                monster.ActiveSkillInstances.TryGetValue(entry.Value, out skill);
-                break;
-            }
+            MonsterActiveSkillRuntime skill = FindMonsterActiveSkillManipulator(monster, binding.ManipulatorId);
             if (skill == null)
                 return false;
             ApplyMonsterActiveSkillSelection(monster, skill);
@@ -991,13 +975,25 @@ public partial class CombatRuntime
             return true;
         }
 
-        private bool TryValidateMonsterActiveSkillTarget(Monster monster, MonsterActiveSkillRuntime skill, CombatTarget target)
+        private static MonsterActiveSkillRuntime FindMonsterActiveSkillManipulator(Monster monster, uint manipulatorId)
+        {
+            foreach (var entry in monster.ManipulatorOrder)
+            {
+                if (unchecked((uint)GetManipulatorInt(entry.Value, "ID", 0)) == manipulatorId)
+                    return monster.ActiveSkillInstances.GetValueOrDefault(entry.Value);
+            }
+            return null;
+        }
+
+        private bool TryValidateMonsterActiveSkillTarget(Monster monster, MonsterActiveSkillRuntime skill, CombatTarget target, bool initialized = false)
         {
             if (monster == null || skill == null || target == null || !monster.IsAlive || !target.IsAlive || !target.HasUnitState)
                 return false;
             if (!MatchesInstance(monster, target.InstanceKey))
                 return false;
-            if (monster.SilenceAttributeValue > 0 || skill.CooldownRemainingTicks != 0 || monster.CurrentManaWire < skill.ManaCostWire)
+            if (monster.SilenceAttributeValue > 0
+                || (skill.CooldownRemainingTicks != 0 && !(initialized && skill.InitUseResetsCooldown))
+                || monster.CurrentManaWire < skill.ManaCostWire)
                 return false;
             int targetType = ResolveMonsterTargetType(skill.TargetType);
             return targetType == 2;
@@ -1012,11 +1008,109 @@ public partial class CombatRuntime
                 : monster.TargetId;
         }
 
+        private bool TryGetMonsterUseTarget(Monster monster, out CombatTarget target)
+        {
+            target = null;
+            if (monster == null || !monster.IsAlive || monster.SelectedActiveSkill == null
+                || !TryGetCombatTarget(monster.SelectedActiveSkillTargetEntityId, out target)
+                || !target.HasUnitState || !MatchesInstance(monster, target.InstanceKey))
+                return false;
+
+            return ResolveMonsterTargetType(monster.SelectedActiveSkill.TargetType) switch
+            {
+                1 => target.Monster is { IsAlive: true, CurrentHPWire: > 0 } friend && AreMonstersFriendsForAuthoredAoe(monster, friend),
+                2 => target.IsAlive,
+                6 => IsMonsterFriendCorpseTarget(monster, target.Monster),
+                _ => false
+            };
+        }
+
+        private bool IsMonsterUseTargetClear(Monster monster)
+        {
+            if (!TryGetMonsterUseTarget(monster, out CombatTarget target))
+                return false;
+            MonsterActiveSkillRuntime skill = monster.SelectedActiveSkill;
+            return ResolveMonsterTargetType(skill.TargetType) == 2
+                ? EvaluateMonsterActiveSkillTargetClearFixed(monster, target, ResolveMonsterSkillTargetClearRangeF32(monster, skill, target))
+                : IsMonsterFriendActiveSkillTargetClear(monster, target.Monster, skill);
+        }
+
+        private bool TryInitializeMonsterUseTarget(Monster monster, bool enteringUse, out bool initialized)
+        {
+            initialized = false;
+            if (!TryGetMonsterUseTarget(monster, out CombatTarget target))
+                return false;
+            MonsterActiveSkillRuntime skill = monster.SelectedActiveSkill;
+            if (!enteringUse)
+            {
+                TryPeekMonsterClientVisiblePositionFixed(monster, target.EntityId, out int actorX, out int actorY, out int actorZ);
+                ResolveMonsterActionTargetPositionFixed(target, out int targetX, out int targetY, out int targetZ);
+                if (!EvaluateUseTargetInitialRangeFixed3D(actorX, actorY, actorZ, targetX, targetY, targetZ,
+                    skill.InitUseRangeF32, 0, false, out _, out _, out _))
+                    return true;
+            }
+            if (monster.SilenceAttributeValue > 0 || skill.CooldownRemainingTicks != 0 || monster.CurrentManaWire < skill.ManaCostWire)
+                return false;
+
+            if (skill.InitUseResetsCooldown)
+            {
+                skill.CooldownRemainingTicks = skill.CooldownTicks;
+                skill.CooldownLastTick = CombatTick;
+                monster.PrimaryActiveSkillCooldownRemainingTicks = skill.CooldownRemainingTicks;
+            }
+            if (skill.AddModifierWhileClosing)
+            {
+                bool prepared = ResolveMonsterTargetType(skill.TargetType) switch
+                {
+                    1 => CanExecuteMonsterSelfActiveSkillEffect(monster, out _),
+                    2 => CanExecuteMonsterTargetActiveSkillEffect(monster, out _),
+                    6 => CanExecuteMonsterCorpseActiveSkillEffect(monster, out _),
+                    _ => false
+                };
+                if (prepared)
+                    ApplyMonsterActiveSkillCastModifier(monster, true);
+            }
+            initialized = true;
+            return true;
+        }
+
+        private void MoveMonsterToUseTarget(Monster monster, bool refresh)
+        {
+            if (!TryGetMonsterUseTarget(monster, out CombatTarget target))
+                return;
+            ResolveMonsterActionTargetPositionFixed(target, out int targetX, out int targetY, out _);
+            if (refresh)
+            {
+                if (monster.UnitMoverPathOwner != MONSTER_MOVE_TO_POINT_USE_TARGET
+                    || (monster.UnitMoverPathTargetFixedX == targetX && monster.UnitMoverPathTargetFixedY == targetY))
+                    return;
+                string mapKey = ResolveMonsterPathMapKey(monster);
+                PathMap map = string.IsNullOrWhiteSpace(mapKey) ? null : PathMapCatalog.Instance.GetPathMap(mapKey);
+                if (map == null || !map.CanReachPointFixed(monster.PosFixedX, monster.PosFixedY, targetX, targetY))
+                    return;
+            }
+            BeginMonsterMoveToPoint(monster, MONSTER_MOVE_TO_POINT_USE_TARGET, targetX, targetY);
+        }
+
+        private void FaceMonsterUseTarget(Monster monster)
+        {
+            if (!TryGetMonsterUseTarget(monster, out CombatTarget target))
+                return;
+            if (ResolveMonsterTargetType(monster.SelectedActiveSkill.TargetType) == 2)
+                FaceMonsterAttackTarget(monster, target);
+            else
+                FaceMonsterFriendActiveSkillTarget(monster, target.Monster);
+        }
+
         private void ClearMonsterUseTargetAction(Monster monster)
         {
             if (monster == null)
                 return;
-            if (monster.ActiveSkillSelfCycle
+            ClearMonsterMoveToPointPath(monster, MONSTER_MOVE_TO_POINT_USE_TARGET);
+            if (monster.AttackPending && monster.UsePrimaryActiveSkillThisAttack
+                && !monster.AttackWeaponCycleFromUseTargetInterrupt && monster.AttackCommitTick <= 0)
+                CompleteMonsterActiveSkillOnlyCycle(monster);
+            else if (monster.ActiveSkillSelfCycle
                 || monster.ActiveSkillEffectPending
                 || monster.ActiveSkillCastModifierApplied
                 || monster.ActiveSkillEffectPlan != null)
@@ -1054,57 +1148,32 @@ public partial class CombatRuntime
             return monster.ActiveSkillSelfCycle;
         }
 
-        public bool DoMonsterUseTargetAction(Monster monster, bool weaponInterruptInput = false)
+        public bool DoMonsterUseTargetAction(Monster monster, bool weaponInterruptInput = false, bool initialized = false)
         {
-            if (monster == null || !monster.IsAlive || monster.SelectedActiveSkill == null)
+            if (!TryGetMonsterUseTarget(monster, out CombatTarget target))
                 return false;
             int selectedTargetType = ResolveMonsterTargetType(monster.SelectedActiveSkill.TargetType);
             if (selectedTargetType == 1)
-                return DoMonsterUseFriendTargetAction(monster);
+                return DoMonsterUseFriendTargetAction(monster, initialized);
             if (selectedTargetType == 6)
-                return DoMonsterUseFriendCorpseTargetAction(monster);
-            if (selectedTargetType != 2)
-                return false;
-            uint targetEntityId = ResolveMonsterRuntimeAttackTargetId(monster);
-            if (!TryGetCombatTarget(targetEntityId, out CombatTarget target) || target == null || !target.IsAlive)
-                return false;
+                return DoMonsterUseFriendCorpseTargetAction(monster, initialized);
             if (monster.AttackPending)
             {
-                if (weaponInterruptInput && monster.AttackCommitTick <= 0)
-                {
-                    ResolveMonsterActionTargetPositionFixed(target, out int targetFixedX, out int targetFixedY, out _);
-                    SetMonsterAttackCommitTargetFixed(monster, targetFixedX, targetFixedY);
-                    FaceMonsterAttackTarget(monster, target);
-                    monster.AttackWeaponCycleFromUseTargetInterrupt = true;
-                    ArmMonsterRuntimeAttack(monster, target, "USETARGET-WEAPON-INTERRUPT", _combatTick);
-                }
-                return true;
+                if (!weaponInterruptInput || monster.AttackCommitTick > 0)
+                    return false;
+                ResolveMonsterActionTargetPositionFixed(target, out int targetFixedX, out int targetFixedY, out _);
+                SetMonsterAttackCommitTargetFixed(monster, targetFixedX, targetFixedY);
+                FaceMonsterAttackTarget(monster, target);
+                monster.AttackWeaponCycleFromUseTargetInterrupt = true;
+                ArmMonsterRuntimeAttack(monster, target, "USETARGET-WEAPON-INTERRUPT", _combatTick);
+                return monster.AttackPending;
             }
-            if (!TryValidateMonsterActiveSkillTarget(monster, monster.SelectedActiveSkill, target))
+            if (!TryValidateMonsterActiveSkillTarget(monster, monster.SelectedActiveSkill, target, initialized))
                 return false;
-            if (!CanExecuteMonsterTargetActiveSkillEffect(monster, out string reason))
-            {
-                Debug.LogError($"[MON-SKILL-USE] {monster.Name}#{monster.EntityId} blocked skill={monster.SelectedActiveSkill.Path ?? "none"} reason={reason ?? "unsupported-target-effect"} sourceFunction=UseTarget::States@0x00548370->ActiveSkill::validateUse@0x00538710");
-                return false;
-            }
-            if (!TryResolveMonsterActiveSkillAnimation(monster, monster.SelectedActiveSkill, out int animationFrames, out int triggerFrames, out int speed)
-                || !TryResolveMonsterActiveSkillCycle(monster.SelectedActiveSkill, animationFrames, triggerFrames, speed, out _, out _, out _))
-            {
-                Debug.LogError($"[MON-SKILL-USE] {monster.Name}#{monster.EntityId} blocked skill={monster.SelectedActiveSkill.Path ?? "none"} reason=active-skill-cycle-unresolved sourceFunction=UseTarget::States@0x00548370->ActiveSkill::useTarget@0x00538F00");
-                return false;
-            }
-            int actualRangeF32 = ResolveMonsterSkillTargetClearRangeF32(monster, monster.SelectedActiveSkill, target);
-            bool targetClear = EvaluateMonsterActiveSkillTargetClearFixed(monster, target, actualRangeF32);
-            if (!targetClear)
-            {
-                ApplyMonsterActiveSkillCastModifier(monster, true);
-                monster.State = MonsterState.Chase;
-                return true;
-            }
-            return BeginMonsterRuntimeAttackAction(monster, target, true, "UseTarget::States@0x00548370");
+            return BeginMonsterRuntimeAttackAction(monster, target, true, "UseTarget::States@0x00548370", initialized);
         }
 
-        private bool DoMonsterUseFriendTargetAction(Monster monster)
+        private bool DoMonsterUseFriendTargetAction(Monster monster, bool initialized)
         {
             MonsterActiveSkillRuntime skill = monster?.SelectedActiveSkill;
             Monster target = GetMonster(monster?.SelectedActiveSkillTargetEntityId ?? 0);
@@ -1119,7 +1188,7 @@ public partial class CombatRuntime
                 return monster.ActiveSkillBusyTicksRemaining != 0;
             if (ResolveMonsterTargetType(skill.TargetType) != 1
                 || monster.SilenceAttributeValue > 0
-                || skill.CooldownRemainingTicks != 0
+                || (skill.CooldownRemainingTicks != 0 && !(initialized && skill.InitUseResetsCooldown))
                 || monster.CurrentManaWire < skill.ManaCostWire
                 || !PassesMonsterActiveSkillHealthPct(target.CurrentHPWire, target.MaxHPWire, skill.HasTargetHealthPct, skill.TargetHealthPctF32)
                 || !IsMonsterFriendActiveSkillTargetClear(monster, target, skill))
@@ -1132,7 +1201,7 @@ public partial class CombatRuntime
             if (!TryResolveMonsterActiveSkillAnimation(monster, skill, out int animationFrames, out int triggerFrames, out int speed)
                 || !TryResolveMonsterActiveSkillCycle(skill, animationFrames, triggerFrames, speed, out ushort busyTicks, out ushort animationTicks, out ushort triggerTicks))
                 return false;
-            CommitMonsterPrimarySkillUse(monster, "UseTarget::States@0x00548370->ActiveSkill::useTarget@0x00538F00");
+            CommitMonsterPrimarySkillUse(monster, "UseTarget::States@0x00548370->ActiveSkill::useTarget@0x00538F00", initialized);
             if (!monster.ActiveSkillUseCommittedThisAttack)
                 return false;
             ApplyMonsterActiveSkillCastModifier(monster, false);
@@ -1141,7 +1210,7 @@ public partial class CombatRuntime
             return monster.ActiveSkillSelfCycle;
         }
 
-        private bool DoMonsterUseFriendCorpseTargetAction(Monster monster)
+        private bool DoMonsterUseFriendCorpseTargetAction(Monster monster, bool initialized)
         {
             MonsterActiveSkillRuntime skill = monster?.SelectedActiveSkill;
             Monster target = GetMonster(monster?.SelectedActiveSkillTargetEntityId ?? 0);
@@ -1151,7 +1220,7 @@ public partial class CombatRuntime
                 return monster.ActiveSkillBusyTicksRemaining != 0;
             if (ResolveMonsterTargetType(skill.TargetType) != 6
                 || monster.SilenceAttributeValue > 0
-                || skill.CooldownRemainingTicks != 0
+                || (skill.CooldownRemainingTicks != 0 && !(initialized && skill.InitUseResetsCooldown))
                 || monster.CurrentManaWire < skill.ManaCostWire
                 || !PassesMonsterActiveSkillHealthPct(target.CurrentHPWire, target.MaxHPWire, skill.HasTargetHealthPct, skill.TargetHealthPctF32)
                 || !IsMonsterFriendActiveSkillTargetClear(monster, target, skill))
@@ -1170,7 +1239,7 @@ public partial class CombatRuntime
             if (!TryResolveMonsterActiveSkillAnimation(monster, skill, out int animationFrames, out int triggerFrames, out int speed)
                 || !TryResolveMonsterActiveSkillCycle(skill, animationFrames, triggerFrames, speed, out ushort busyTicks, out ushort animationTicks, out ushort triggerTicks))
                 return false;
-            CommitMonsterPrimarySkillUse(monster, "UseTarget::States@0x00548370->ActiveSkill::useTarget@0x00538F00");
+            CommitMonsterPrimarySkillUse(monster, "UseTarget::States@0x00548370->ActiveSkill::useTarget@0x00538F00", initialized);
             if (!monster.ActiveSkillUseCommittedThisAttack)
                 return false;
             FaceMonsterFriendActiveSkillTarget(monster, target);
@@ -1332,7 +1401,7 @@ public partial class CombatRuntime
             Debug.LogError($"[MON-SEARCH-LOCAL-USE] entity={monster.EntityId} target={target.EntityId} tick={_combatTick} useTick={monster.LocalAttackActionUseTick} admission=next-AttackTarget2-state5 sourceFunction=SearchForAttack::States@0x0052DFB0->Action::terminate@0x0052C1C0->MonsterBehavior2::DoAttackAction@0x0051D900");
         }
 
-        private bool BeginMonsterRuntimeAttackAction(Monster monster, CombatTarget target, bool useActiveSkill, string source)
+        private bool BeginMonsterRuntimeAttackAction(Monster monster, CombatTarget target, bool useActiveSkill, string source, bool initialized = false)
         {
             if (monster == null || target == null || !monster.IsAlive || !target.IsAlive || monster.AttackPending)
                 return monster?.AttackPending == true;
@@ -1385,7 +1454,6 @@ public partial class CombatRuntime
             monster.Ai?.SetState(MonsterStateId.Attack, "DoAttackAction");
             if (monster.Ai != null)
                 monster.Ai.SkillDelayTimer = 300;
-            EncounterMarkActive(monster, "DoAttackAction");
             monster.AttackSessionId++;
             if (monster.AttackSessionId == 0)
                 monster.AttackSessionId = 1;
@@ -1403,7 +1471,7 @@ public partial class CombatRuntime
             FaceMonsterAttackTarget(monster, target);
             if (monster.UsePrimaryActiveSkillThisAttack)
             {
-                CommitMonsterPrimarySkillUse(monster, "UseTarget::States@0x00548370->ActiveSkill::use@0x00538DD0");
+                CommitMonsterPrimarySkillUse(monster, "UseTarget::States@0x00548370->ActiveSkill::use@0x00538F00", initialized);
                 if (!monster.ActiveSkillUseCommittedThisAttack)
                 {
                     CancelMonsterPendingAttack(monster, "active-skill-validate-failed");
@@ -1475,11 +1543,12 @@ public partial class CombatRuntime
                 monster.HeadingFixed = UnitMover.InterpolateHeading(monster.HeadingFixed, 0, turnRateFixed);
             }
             monster.Behavior.UpdateActions(behaviorContext);
-            AdvanceRetiredWanderMover(monster);
             if (monster.StockUnitState == 4)
                 CompleteStockUnitSpawn(monster);
             bool moverSuppressed = (monster.UnitFlags & 0x1000) != 0;
-            if (!moverSuppressed)
+            bool activeWanderMover = monster.Behavior.CurrentAction == Behavior.MonsterBehavior2.ActionSlot.Wander
+                && WanderSimulator.Instance.IsRegisteredEntity(monster.EntityId);
+            if (!moverSuppressed && !activeWanderMover && !AdvanceRetiredWanderMover(monster))
             {
                 AdvanceMonsterUnitMoverFacing(monster);
                 ProcessMonsterMovement(0, monster, true);

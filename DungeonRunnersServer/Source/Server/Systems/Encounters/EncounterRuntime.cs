@@ -40,9 +40,6 @@ namespace DungeonRunners.Combat
         public void MarkActive()
         {
             StateByte = 2;
-            SeenFlag = true;
-            if (ActiveTimer == 0)
-                ActiveTimer = 0x96;
         }
 
         public bool TickActive(bool playerInRange)

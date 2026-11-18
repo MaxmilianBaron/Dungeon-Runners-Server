@@ -65,7 +65,23 @@ namespace DungeonRunners.Networking
         private ushort _allocatedAgility = 0;
         private ushort _allocatedEndurance = 0;
         private ushort _allocatedIntellect = 0;
+        private ushort _stagedAllocatedStrength;
+        private ushort _stagedAllocatedAgility;
+        private ushort _stagedAllocatedEndurance;
+        private ushort _stagedAllocatedIntellect;
+        private bool _hasStagedAllocatedStats;
         private HeroAttributeData _heroAttributes;
+        public int? UnitDescriptionCollisionRadiusF32 => _heroAttributes?.CollisionRadiusF32;
+        public int SizeModPercent
+        {
+            get
+            {
+                int value = unchecked((_heroAttributes?.SizeModPercent ?? 100) + GetEquipmentStat("SIZEMOD") + GetPassiveAttributeModifierValue("SIZEMOD"));
+                foreach (AttributeModifierRuntime modifier in _attributeModifiers)
+                    value = unchecked(value + GetAuthoredAttributeValue(modifier, "SIZEMOD"));
+                return value;
+            }
+        }
         private int BaseStrength => NativeAttributeMath.AddBasePrimaryAttribute(0, _heroAttributes?.Strength ?? 0, _allocatedStrength);
         private int BaseAgility => NativeAttributeMath.AddBasePrimaryAttribute(0, _heroAttributes?.Agility ?? 0, _allocatedAgility);
         private int BaseEndurance => NativeAttributeMath.AddBasePrimaryAttribute(0, _heroAttributes?.Endurance ?? 0, _allocatedEndurance);
@@ -364,10 +380,10 @@ namespace DungeonRunners.Networking
             return _heroAttributes == null ? 0 : ClassPassiveData.CalculateManaWire(_level, includePassives ? Intelligence : _intellectWithoutPassives, rate, bonus, modifier, _heroAttributes);
         }
 
-        public int AllocatedStrength => _allocatedStrength;
-        public int AllocatedAgility => _allocatedAgility;
-        public int AllocatedEndurance => _allocatedEndurance;
-        public int AllocatedIntellect => _allocatedIntellect;
+        public int AllocatedStrength => _hasStagedAllocatedStats ? _stagedAllocatedStrength : _allocatedStrength;
+        public int AllocatedAgility => _hasStagedAllocatedStats ? _stagedAllocatedAgility : _allocatedAgility;
+        public int AllocatedEndurance => _hasStagedAllocatedStats ? _stagedAllocatedEndurance : _allocatedEndurance;
+        public int AllocatedIntellect => _hasStagedAllocatedStats ? _stagedAllocatedIntellect : _allocatedIntellect;
         public int ClientSpellIntellect => Intelligence;
         public int StunResist => Math.Max(0, 4 + GetEquipmentStat("STUN_RESIST", "STUNRESIST") + ResolveStunResistBonus());
         public byte UpdateNumber = 0;
@@ -397,6 +413,7 @@ namespace DungeonRunners.Networking
 
         public void InitializeEntityEpochRuntime(bool preserveAttributeModifiers = false)
         {
+            _hasStagedAllocatedStats = false;
             if (!preserveAttributeModifiers)
                 ClearEntityEpochAttributeModifiers();
             _regenCooldown = 0;
@@ -471,11 +488,23 @@ namespace DungeonRunners.Networking
             Debug.LogError($"[PLAYERSTATE] INITIALIZED: {_className} Level {_level} | BaseHP={_baseHPWire} BaseMana={_baseManaWire}");
         }
 
+        public void StageAllocatedStats(int strength, int agility, int endurance, int intellect)
+        {
+            if (_heroAttributes == null)
+                throw new InvalidOperationException("Player authored attributes have not been initialized.");
+            _stagedAllocatedStrength = unchecked((ushort)strength);
+            _stagedAllocatedAgility = unchecked((ushort)agility);
+            _stagedAllocatedEndurance = unchecked((ushort)endurance);
+            _stagedAllocatedIntellect = unchecked((ushort)intellect);
+            _hasStagedAllocatedStats = true;
+        }
+
         public void ApplyAllocatedStats(int strength, int agility, int endurance, int intellect)
         {
             if (_heroAttributes == null)
                 throw new InvalidOperationException("Player authored attributes have not been initialized.");
             bool preserveRegenClock = HasEntitySynchInfoHP && _entitySynchInfoHPTick >= 0;
+            _hasStagedAllocatedStats = false;
 
             _allocatedStrength = unchecked((ushort)strength);
             _allocatedAgility = unchecked((ushort)agility);
@@ -880,6 +909,8 @@ namespace DungeonRunners.Networking
 
         public void AdvanceEntitySynchInfoHPToTick(uint tick, string source = null, bool clientDriven = false)
         {
+            if (_hasStagedAllocatedStats)
+                ApplyAllocatedStats(_stagedAllocatedStrength, _stagedAllocatedAgility, _stagedAllocatedEndurance, _stagedAllocatedIntellect);
             if (_entitySynchInfoHPTick < 0)
             {
                 _entitySynchInfoHPTick = tick;

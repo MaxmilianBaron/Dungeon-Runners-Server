@@ -256,9 +256,9 @@ namespace DungeonRunners.Combat
                         ws.TargetAttempt++;
                         Debug.LogError($"[WANDER-TGT] entity={ws.EntityId} st={ws.State} cw={(ws.CanWander ? 1 : 0)} anchorFixed8=({baseFixedX},{baseFixedY}) currentFixed8=({ws.FixedX},{ws.FixedY}) rawX=0x{rawX:X8} rawY=0x{rawY:X8} targetFixed8=({tgtFixedX},{tgtFixedY})");
                         bool pathValid = true;
+                        PathMap pathMap = ResolveWanderPathMap(ws);
                         if (ws.CanWander && !string.IsNullOrWhiteSpace(ws.Monster.ZoneName))
                         {
-                            var pathMap = ResolveWanderPathMap(ws);
                             PathReachability reachability = PathReachability.Reachable;
                             if (pathMap != null)
                             {
@@ -272,6 +272,14 @@ namespace DungeonRunners.Combat
                             }
                         }
                         LogVerboseWander($"[WANDER-AUDIT] entity={ws.EntityId} state=1 attempt={ws.TargetAttempt} canWander={ws.CanWander} anchorFixed8=({baseFixedX},{baseFixedY}) currentFixed8=({ws.FixedX},{ws.FixedY}) rawX=0x{rawX:X8} rawY=0x{rawY:X8} targetFixed8=({tgtFixedX},{tgtFixedY}) pathValid={pathValid} accepted=True rng={rngBeforeTarget}->{roomRng?.CallsSinceReseed ?? -1} stream=room");
+                        if (pathMap != null && pathMap.FindValidDestPointFixed(
+                                ws.FixedX, ws.FixedY, tgtFixedX, tgtFixedY,
+                                pathMap.GetClosestNodeFixed(ws.FixedX, ws.FixedY, ws.FixedZ), 0x6400,
+                                out int goalFixedX, out int goalFixedY, out _))
+                        {
+                            tgtFixedX = goalFixedX;
+                            tgtFixedY = goalFixedY;
+                        }
                         ws.HasTarget = true;
                         int headingFixed = UnitMover.VectorToHeadingFixed(tgtFixedX - ws.FixedX, tgtFixedY - ws.FixedY);
                         ws.TargetFixedX = tgtFixedX;

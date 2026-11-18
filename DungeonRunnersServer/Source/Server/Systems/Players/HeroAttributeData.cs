@@ -8,6 +8,8 @@ namespace DungeonRunners.Data
         public ushort Agility { get; }
         public ushort Endurance { get; }
         public ushort Intellect { get; }
+        public int CollisionRadiusF32 { get; }
+        public ushort SizeModPercent { get; }
         public int HealthPerEnduranceFactorF32 { get; }
         public int ManaPerIntellectFactorF32 { get; }
         public int HealthPerEnduranceF32 { get; }
@@ -21,6 +23,8 @@ namespace DungeonRunners.Data
             Agility = unchecked((ushort)description.GetInt("Agility"));
             Endurance = unchecked((ushort)description.GetInt("Toughness"));
             Intellect = unchecked((ushort)description.GetInt("Power"));
+            CollisionRadiusF32 = description.GetFixed32("CollisionRadius", 5 * 0x100);
+            SizeModPercent = unchecked((ushort)description.GetInt("SizeMod", 100));
             HealthPerEnduranceFactorF32 = description.GetFixed32("HealthPerEnduranceMod");
             ManaPerIntellectFactorF32 = description.GetFixed32("PowerPerIntellectMod");
             HealthPerEnduranceF32 = database.GetRequiredKnobFixed32("HealthPerEndurance");

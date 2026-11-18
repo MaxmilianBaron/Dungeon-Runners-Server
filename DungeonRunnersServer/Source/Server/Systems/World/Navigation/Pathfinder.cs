@@ -119,7 +119,7 @@ namespace DungeonRunners.Core
             int expanded = 0;
             while (expanded < maxSteps)
             {
-                if (_openSet.Count == 0)
+                if (_openByPathMapNode.Count == 0 || _openSet.Count == 0)
                 {
                     _done = true;
                     break;
@@ -128,7 +128,7 @@ namespace DungeonRunners.Core
                 Node current = _openSet.Min;
                 _openSet.Remove(current);
                 _openByPathMapNode.Remove(current.PathMapNode);
-                _closedByPathMapNode[current.PathMapNode] = current;
+                _closedByPathMapNode.TryAdd(current.PathMapNode, current);
 
                 if (_bestNode == null || current.H < _bestNode.H)
                     _bestNode = current;
@@ -162,6 +162,7 @@ namespace DungeonRunners.Core
                 PathNode neighbor = _pathMap.GetNodeAt(cx + dx, cy + dy);
                 if (neighbor == null) continue;
                 if (!neighbor.IsWalkable) continue;
+                if (current.Parent != null && ReferenceEquals(neighbor, current.Parent.PathMapNode)) continue;
 
                 int stepCost = PathMap.DirectionCosts[dirIndex];
                 int newG = current.G + stepCost;
@@ -174,7 +175,7 @@ namespace DungeonRunners.Core
 
                 if (openNode != null)
                 {
-                    _openSet.Remove(openNode);
+                    RemoveObsoleteOpenNode(openNode);
                     _openByPathMapNode.Remove(neighbor);
                 }
                 if (closedNode != null)
@@ -193,6 +194,28 @@ namespace DungeonRunners.Core
                 _openSet.Add(newNode);
                 _openByPathMapNode[neighbor] = newNode;
             }
+        }
+
+        private void RemoveObsoleteOpenNode(Node node)
+        {
+            var range = _openSet.GetViewBetween(
+                new Node { F = node.F, Sequence = long.MinValue },
+                new Node { F = int.MaxValue, Sequence = long.MaxValue });
+            using var iterator = range.GetEnumerator();
+            if (!iterator.MoveNext() || iterator.Current.F != node.F)
+                return;
+            do
+            {
+                Node candidate = iterator.Current;
+                if (candidate.H != node.H)
+                    return;
+                if (ReferenceEquals(candidate, node))
+                {
+                    _openSet.Remove(candidate);
+                    return;
+                }
+            }
+            while (iterator.MoveNext());
         }
 
 

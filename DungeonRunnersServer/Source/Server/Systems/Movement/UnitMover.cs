@@ -306,6 +306,11 @@ namespace DungeonRunners.Combat
 
         public static int VectorToHeadingFixed(int dxFixed, int dyFixed)
         {
+            return WrapDegrees(GetDestHeadingFixed(dxFixed, dyFixed) >> 8) << 8;
+        }
+
+        public static int GetDestHeadingFixed(int dxFixed, int dyFixed)
+        {
             if (dxFixed == 0 && dyFixed == 0) return 0;
             int xSq = (int)(((long)dxFixed * dxFixed) >> 8);
             int ySq = (int)(((long)dyFixed * dyFixed) >> 8);
@@ -326,8 +331,7 @@ namespace DungeonRunners.Combat
                 if (dyFixed < 0) h = (AcosTable[ratio] >> 8) + 0x5a;
                 else h = 0x5a - (AcosTable[ratio] >> 8);
             }
-            int deg = ((0x168 - h) % 0x168 + 0x168) % 0x168;
-            return deg << 8;
+            return (0x168 - h) << 8;
         }
 
         public static int NormalizedVectorToHeadingFixed(int dxFixed, int dyFixed)

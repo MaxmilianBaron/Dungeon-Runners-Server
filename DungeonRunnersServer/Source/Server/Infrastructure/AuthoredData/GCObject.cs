@@ -334,7 +334,7 @@ namespace DungeonRunners.Data
             propertyValue = GetPropertyUInt32("Slot");
             if (propertyValue != 0)
                 return propertyValue;
-            return TargetSlot ?? GetEquipmentSlotFromGCClass();
+            return TargetSlot ?? 0u;
         }
 
         public int ResolveNativeItemLevel(int observerLevel)

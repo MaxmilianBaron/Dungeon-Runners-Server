@@ -84,7 +84,6 @@ namespace DungeonRunners.Combat
             monster.MoveInDirectionHeadingInit = false;
             monster.UnitMoverDesiredHeadingInit = false;
             monster.UnitMoverMovingThisFrame = false;
-            monster.ClientVisibleMovingThisFrame = false;
             if (wasActive)
                 Debug.LogError($"[MON-FLEE] entity={monster.EntityId} tick={_combatTick} event=stop sourceFunction=Flee::stop@0x00526840");
         }
@@ -180,8 +179,6 @@ namespace DungeonRunners.Combat
                 return false;
             bool previousMoving = monster.UnitMoverMovingThisFrame;
             monster.UnitMoverMovingThisFrame = false;
-            monster.ClientVisibleMovingThisFrameTick = _combatTick;
-            monster.ClientVisibleMovingThisFrame = false;
             int speedFixed = ResolveMonsterMovementSpeedFixed(monster);
             if (speedFixed <= 0)
                 return true;
@@ -232,7 +229,6 @@ namespace DungeonRunners.Combat
             monster.ChaseHeadingFixed = nextHeadingFixed;
             monster.HeadingFixed = nextHeadingFixed;
             monster.UnitMoverMovingThisFrame = movingThisFrame && (nextFixedX != curFixedX || nextFixedY != curFixedY);
-            monster.ClientVisibleMovingThisFrame = nextFixedX != curFixedX || nextFixedY != curFixedY;
             if (emitPositionChanged)
                 OnMonsterPositionChanged?.Invoke(monster);
             Debug.LogError($"[MON-FLEE-MOVE] entity={monster.EntityId} tick={_combatTick} position=({curFixedX},{curFixedY})->({nextFixedX},{nextFixedY}) heading={nextHeadingFixed} desired={monster.MoveInDirectionHeadingFixed} touchingCorner={monster.FleeTouchingCorner} speedF32={speedFixed} sourceFunction=Flee::updateState@0x00526930->UnitMover::MoveInDirection@0x00536080");

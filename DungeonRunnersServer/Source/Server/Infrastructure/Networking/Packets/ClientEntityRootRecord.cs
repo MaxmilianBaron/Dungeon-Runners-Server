@@ -43,11 +43,39 @@ namespace DungeonRunners.Networking
         {
             if (!Validate(writer, roots))
                 return;
+            WriteSnapshotRecords(writer, roots, roots);
+        }
+
+        public static void WriteSnapshotInInitializationOrder(LEWriter writer, IReadOnlyList<ClientEntityRootRecord> roots, IReadOnlyList<ClientEntityRootRecord> initializationRoots)
+        {
+            if (!Validate(writer, roots))
+                return;
+            if (initializationRoots == null)
+                throw new ArgumentNullException(nameof(initializationRoots));
+            var remaining = new HashSet<ClientEntityRootRecord>(roots);
+            if (remaining.Count != roots.Count || initializationRoots.Count != roots.Count)
+            {
+                writer.Abort();
+                return;
+            }
+            foreach (ClientEntityRootRecord root in initializationRoots)
+            {
+                if (root == null || !remaining.Remove(root))
+                {
+                    writer.Abort();
+                    return;
+                }
+            }
+            WriteSnapshotRecords(writer, roots, initializationRoots);
+        }
+
+        private static void WriteSnapshotRecords(LEWriter writer, IReadOnlyList<ClientEntityRootRecord> roots, IReadOnlyList<ClientEntityRootRecord> initializationRoots)
+        {
             foreach (ClientEntityRootRecord root in roots)
             {
                 root.WriteCreate(writer, 0x01);
             }
-            foreach (ClientEntityRootRecord root in roots)
+            foreach (ClientEntityRootRecord root in initializationRoots)
             {
                 writer.WriteByte(0x02);
                 writer.WriteUInt16(root.Id);

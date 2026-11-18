@@ -51,7 +51,6 @@ public partial class CombatRuntime
             monster.OnDeadDispatched = false;
             monster.MoveInDirectionHeadingInit = false;
             monster.UnitMoverMovingThisFrame = false;
-            monster.ClientVisibleMovingThisFrame = false;
             monster.SpeedMod = monster.BaseSpeedMod;
             _monsterRuntimeDamageCommitted.Remove(monster.EntityId);
             _monsterHPRegenLastTick[monster.EntityId] = _combatTick;
@@ -277,18 +276,20 @@ public partial class CombatRuntime
             return true;
         }
 
-        private void AdvanceRetiredWanderMover(Monster monster)
+        private bool AdvanceRetiredWanderMover(Monster monster)
         {
             if (monster == null
+                || !monster.IsAlive
                 || !monster.RetiredWanderMoverActive
                 || WanderSimulator.Instance.IsRegisteredEntity(monster.EntityId)
                 || monster.UnitMoverPathOwner != 0
+                || monster.MoveInDirectionHeadingInit
                 || monster.SearchForAttackMoveActive
                 || monster.FollowRepositionMoveActive
                 || monster.FollowFindLineOfSightMoveActive
-                || monster.Behavior?.FollowActive == true
+                || monster.Behavior?.FollowMovesTowardTarget == true
                 || monster.Behavior?.UseTargetActive == true)
-                return;
+                return false;
             int speedFixed = monster.MoveSpeedF32 > 0 ? monster.MoveSpeedF32 : monster.WalkSpeedF32;
             int stepFixed = UnitMover.CacheSpeedPerFrame(speedFixed, monster.SpeedMod + monster.GetActiveAttributeModifierValue("SPEEDMOD"), out _);
             int turnRateFixed = UnitMover.TurnRatePerTickFixed(monster.TurnRateDegrees);
@@ -303,17 +304,21 @@ public partial class CombatRuntime
             monster.ChaseHeadingFixed = nextHeadingFixed;
             monster.ChaseHeadingInit = true;
             if (arrived)
+            {
                 monster.RetiredWanderMoverActive = false;
+                monster.UnitMoverDesiredHeadingFixed = nextHeadingFixed;
+                monster.UnitMoverDesiredHeadingInit = true;
+                monster.UnitMoverMovingThisFrame = false;
+            }
+            return true;
         }
 
-        private bool AggroMonster(Monster monster, CombatTarget player, string reason, bool alignForCombat, bool queueFollowBehaviorInput = true, uint followInputApplyTick = uint.MaxValue, uint directPlayerWeaponHitTick = 0, uint playerDamageTick = 0)
+        private bool AggroMonster(Monster monster, CombatTarget player, string reason)
         {
             if (monster == null || player == null || !monster.IsAlive) return false;
             if (!IsMonsterEnemyOfTarget(monster, player)) return false;
             bool firstAggro = !monster.AggroTriggered || monster.TargetId != player.EntityId;
             bool hadWanderMover = firstAggro && PreserveMonsterWanderMoverState(monster);
-            monster.FollowAdmissionReachable = true;
-            monster.ProximityFollowAdmissionPending = false;
             monster.ProximityTargetScanMatched = false;
             monster.ProximityAttackInputApplyTick = 0;
             monster.DeferredTargetScanMessagePending = false;
@@ -332,22 +337,18 @@ public partial class CombatRuntime
                     monster.WanderActionTerminationPending = true;
                 monster.AttackPending = false;
                 monster.AttackSoundPending = false;
-                if (queueFollowBehaviorInput)
-                    QueueMonsterFollowBehaviorInput(monster, player, followInputApplyTick, directPlayerWeaponHitTick, playerDamageTick);
                 Debug.LogError($"[SERVER-AGGRO] {monster.Name} -> {player.Name} reason={reason}");
-                OnMonsterAggro?.Invoke(monster, player);
             }
             TraceMonsterState(monster, "aggro", player, Distance2DFixed(monster.PosFixedX, monster.PosFixedY, player.PosFixedX, player.PosFixedY), ResolveMonsterEffectiveAttackRangeFixed(monster), reason);
             return firstAggro;
         }
 
-        private void PropagateMonsterShout(Monster source, CombatTarget player, bool notifyBehaviorThreat = true, uint proximityAssistApplyTick = uint.MaxValue)
+        private void PropagateMonsterShout(Monster source, CombatTarget player)
         {
             int shoutFixed = ResolveMonsterShoutRangeFixed(source);
             if (source == null || player == null || shoutFixed <= 0) return;
             long shoutSq = ((long)shoutFixed * shoutFixed) >> 8;
             string pathMapKey = ResolveMonsterPathMapKey(source);
-            PathMap pathMap = !string.IsNullOrWhiteSpace(pathMapKey) ? PathMapCatalog.Instance.GetPathMap(pathMapKey) : null;
             var ranked = new List<(Monster Monster, long DistanceSq)>();
             foreach (var monster in GetAllMonsters())
             {
@@ -377,28 +378,10 @@ public partial class CombatRuntime
                     continue;
                 }
 
-                bool queueFollow = pathMap == null
-                    || pathMap.GetReachabilityFixed(source.PosFixedX, source.PosFixedY, monster.PosFixedX, monster.PosFixedY) == PathReachability.Reachable;
                 int alertDistanceFixed = Distance2DFixed(source.PosFixedX, source.PosFixedY, monster.PosFixedX, monster.PosFixedY);
-                Debug.LogError($"[SERVER-SHOUT] source={source.EntityId} target={monster.EntityId} shoutF32={source.ShoutRangeF32} distFixed8={alertDistanceFixed} action=notify-friend relation={relation} follow={queueFollow} sourceTarget={source.TargetId} sourceGroup={source.EncounterGroupKey ?? ""} targetGroup={monster.EncounterGroupKey ?? ""}");
+                Debug.LogError($"[SERVER-SHOUT] source={source.EntityId} target={monster.EntityId} shoutF32={source.ShoutRangeF32} distFixed8={alertDistanceFixed} action=notify-friend relation={relation} sourceTarget={source.TargetId} sourceGroup={source.EncounterGroupKey ?? ""} targetGroup={monster.EncounterGroupKey ?? ""}");
                 TraceMonsterState(monster, "alert", player, alertDistanceFixed, ResolveMonsterEffectiveAttackRangeFixed(monster), $"source={source.EntityId} relation={relation}");
-                bool proximityAssistInput = proximityAssistApplyTick != uint.MaxValue;
-                uint followInputApplyTick = proximityAssistInput
-                    ? proximityAssistApplyTick
-                    : source.FollowInputPending
-                        ? source.FollowInputApplyTick
-                        : uint.MaxValue;
-                uint directPlayerWeaponHitTick = proximityAssistInput
-                    ? 0
-                    : source.FollowInputPending
-                        ? source.FollowInputDirectPlayerWeaponHitTick
-                        : 0;
-                uint playerDamageTick = proximityAssistInput
-                    ? 0
-                    : source.FollowInputPending
-                        ? source.FollowInputPlayerDamageTick
-                        : 0;
-                AdmitMonsterAssist(monster, source, player, relation, queueFollow, "notifyFriends", notifyBehaviorThreat, followInputApplyTick, directPlayerWeaponHitTick, playerDamageTick);
+                AdmitMonsterAssist(monster, source, player, relation, "notifyFriends");
             }
         }
 
@@ -426,7 +409,7 @@ public partial class CombatRuntime
             return unchecked((ushort)(product / 100));
         }
 
-        private bool AdmitMonsterAssist(Monster monster, Monster alertSource, CombatTarget target, string relation, bool queueFollow, string source, bool notifyBehaviorThreat = true, uint followInputApplyTick = uint.MaxValue, uint directPlayerWeaponHitTick = 0, uint playerDamageTick = 0)
+        private bool AdmitMonsterAssist(Monster monster, Monster alertSource, CombatTarget target, string relation, string source)
         {
             if (monster == null || alertSource == null || target == null || !monster.IsAlive || monster.AggroTriggered || monster.TargetId != 0)
                 return false;
@@ -443,19 +426,10 @@ public partial class CombatRuntime
                 monster.WanderActionTerminationPending = true;
             monster.AttackPending = false;
             monster.AttackSoundPending = false;
-            monster.FollowAdmissionReachable = queueFollow;
-            if (queueFollow)
-            {
-                QueueMonsterFollowBehaviorInput(monster, target, followInputApplyTick, directPlayerWeaponHitTick, playerDamageTick);
-                OnMonsterAggro?.Invoke(monster, target);
-            }
-            if (notifyBehaviorThreat)
-            {
-                monster.BehaviorAssistSourceEntityId = alertSource.EntityId;
-                NotifyMonsterBehaviorThreatInput(monster, target, true);
-            }
-            Debug.LogError($"[SERVER-ASSIST] source={alertSource.Name}#{alertSource.EntityId} target={monster.Name}#{monster.EntityId} copiedTarget={target.Name}#{target.EntityId} relation={relation} follow={queueFollow} behaviorThreat={notifyBehaviorThreat} source={source ?? "unknown"}");
-            TraceMonsterState(monster, "assist", target, Distance2DFixed(monster.PosFixedX, monster.PosFixedY, target.PosFixedX, target.PosFixedY), ResolveMonsterEffectiveAttackRangeFixed(monster), $"source={alertSource.EntityId} relation={relation} follow={queueFollow}");
+            monster.BehaviorAssistSourceEntityId = alertSource.EntityId;
+            NotifyMonsterBehaviorThreatInput(monster, target, true);
+            Debug.LogError($"[SERVER-ASSIST] source={alertSource.Name}#{alertSource.EntityId} target={monster.Name}#{monster.EntityId} copiedTarget={target.Name}#{target.EntityId} relation={relation} source={source ?? "unknown"}");
+            TraceMonsterState(monster, "assist", target, Distance2DFixed(monster.PosFixedX, monster.PosFixedY, target.PosFixedX, target.PosFixedY), ResolveMonsterEffectiveAttackRangeFixed(monster), $"source={alertSource.EntityId} relation={relation}");
             return true;
         }
 
@@ -803,7 +777,7 @@ public partial class CombatRuntime
             }
             InitializeRoomRng(seed);
         }
-        public event Action<Monster, CombatTarget> OnMonsterAggro;
+        public event Action<Monster, CombatTarget> OnMonsterFollowRequested;
         public CombatPlayer GetPlayer(uint entityId)
         {
             return _players.TryGetValue(entityId, out var p) ? p : null;
@@ -882,7 +856,10 @@ public partial class CombatRuntime
             int weaponDescRangeF32 = hasWeaponDescription
                 ? unchecked((ushort)authoredWeapon.GetInt("Range", 0)) << 8
                 : Math.Max(0, GetAuthoredFixed32(authoredWeapon, "Range", 0));
-            AttackTiming attackTiming = ResolveAttackTiming(authoredDesc, weaponShotType != 0, spawnGcType ?? creatureData.gcType);
+            int projectileAnimationId = weaponUsesProjectile
+                ? AuthoredWeaponTypes.GetWeaponClassId(authoredWeapon) * 100 + (weaponShotType == 0 ? 10 : 15)
+                : 0;
+            AttackTiming attackTiming = ResolveAttackTiming(authoredDesc, weaponShotType != 0, spawnGcType ?? creatureData.gcType, projectileAnimationId);
             string attackType = GetAuthoredBehaviorString(authoredBehavior, authoredCreature, "AttackType", "0");
             string idleAction = GetAuthoredBehaviorString(authoredBehavior, authoredCreature, "IdleAction", "3");
             string logicType = GetAuthoredBehaviorString(authoredBehavior, authoredCreature, "LogicType", "0");
@@ -1070,6 +1047,9 @@ public partial class CombatRuntime
                 WeaponShotType = weaponShotType,
                 WeaponProjectileSpeedF32 = weaponProjectileSpeedF32,
                 WeaponProjectileSizeF32 = weaponProjectileSizeF32,
+                WeaponProjectileSourceOffsetX = attackTiming.ProjectileSourceOffsetX,
+                WeaponProjectileSourceOffsetY = attackTiming.ProjectileSourceOffsetY,
+                WeaponProjectileSourceOffsetZ = attackTiming.ProjectileSourceOffsetZ,
                 WeaponRangeF32 = weaponDescRangeF32,
                 PosFixedX = posFixedX,
                 PosFixedY = posFixedY,
@@ -1089,6 +1069,7 @@ public partial class CombatRuntime
                 LeashRangeF32 = leashRangeF32,
                 AttackRangeF32 = attackRangeF32,
                 UnitDescAttackRangeF32 = unitDescAttackRangeF32,
+                FleeRangeF32 = fleeRangeF32,
                 ClientSyncToleranceF32 = clientSyncToleranceF32,
                 CollisionRadiusF32 = collisionRadiusF32,
                 BoundingBoxRadiusXYF32 = boundingBoxRadiusXYF32,

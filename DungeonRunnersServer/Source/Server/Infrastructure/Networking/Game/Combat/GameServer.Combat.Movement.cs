@@ -581,9 +581,9 @@ namespace DungeonRunners.Networking
             }
 
             int experienceMod = checked(playerState.ExperienceModPercent + playerState.GetActiveAttributeModifierValue("EXPMOD"));
-            int clientExperience = unchecked(appliedF32 >> 8);
-            int scaledExperience = unchecked(clientExperience * experienceMod);
-            uint result = scaledExperience > 0 ? unchecked((uint)scaledExperience) : 0u;
+            int clientExperience = unchecked(appliedF32 * 100) >> 8;
+            uint scaledExperience = unchecked((uint)(clientExperience * experienceMod));
+            uint result = scaledExperience / 100u;
             Debug.LogError($"[XP-CLIENT] monster={monster.Name}#{monster.EntityId} experienceF32={experienceF32} difficultyF32={monster.DifficultyF32} experienceValueMultF32={monster.ExperienceValueMultF32} sourceLevel={stockUnitLevel} playerLevel={playerLevel} effectiveLevel={effectiveLevel} ratioF32={ratioF32} expMod={experienceMod} free={isFree} appliedF32={appliedF32} clientExperience={clientExperience} effectiveXP={result}");
             return result;
         }

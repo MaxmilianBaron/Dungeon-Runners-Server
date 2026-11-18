@@ -2203,6 +2203,11 @@ namespace DungeonRunners.Networking
                         Debug.LogError($"[CH13] -> Routing to goToCheckpoint (0x07)");
                         HandleCheckpointTeleportRequest(conn, data);
                     }
+                    else if (messageType == 0x08)
+                    {
+                        if (data is { Length: 1 } && data[0] == 1 && conn.TickUpdatesActive)
+                            HandleClientRequestRespawn(conn, zoneErrorTransfer: true);
+                    }
                     else if (messageType == 0x0C)
                     {
                         Debug.LogError($"[CH13] -> Routing to Obelisk (0x0C)");

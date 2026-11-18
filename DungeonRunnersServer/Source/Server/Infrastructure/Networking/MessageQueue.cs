@@ -6,7 +6,8 @@ namespace DungeonRunners.Networking
     public enum ClientEntityMessageRole
     {
         None,
-        OwnerClientControlReset
+        OwnerClientControlReset,
+        OwnerHeroStatUpdate
     }
 
     public class MessageQueue
@@ -25,8 +26,9 @@ namespace DungeonRunners.Networking
             public ulong NativeMoverBatchId;
             public ushort DeferredComponentId;
             public ClientEntityMessageRole Role;
+            public Func<byte[], byte[]> Serializer;
 
-            public QueueEntry(byte[] data, Func<byte[]> builder, bool retryOnEmpty, bool isNativeMoverUpdate = false, bool hasNativeMoverCadence = false, ushort nativeMoverComponentId = 0, int nativeMoverRecords = 0, int nativeMoverDelayFlushes = 0, int delayFlushes = 0, ulong nativeMoverBatchId = 0, ushort deferredComponentId = 0, ClientEntityMessageRole role = ClientEntityMessageRole.None)
+            public QueueEntry(byte[] data, Func<byte[]> builder, bool retryOnEmpty, bool isNativeMoverUpdate = false, bool hasNativeMoverCadence = false, ushort nativeMoverComponentId = 0, int nativeMoverRecords = 0, int nativeMoverDelayFlushes = 0, int delayFlushes = 0, ulong nativeMoverBatchId = 0, ushort deferredComponentId = 0, ClientEntityMessageRole role = ClientEntityMessageRole.None, Func<byte[], byte[]> serializer = null)
             {
                 Data = data;
                 Builder = builder;
@@ -40,6 +42,7 @@ namespace DungeonRunners.Networking
                 NativeMoverBatchId = nativeMoverBatchId;
                 DeferredComponentId = deferredComponentId;
                 Role = role;
+                Serializer = serializer;
             }
         }
 
@@ -79,7 +82,7 @@ namespace DungeonRunners.Networking
                 _queue.Enqueue(new QueueEntry(data, null, false, true, true, componentId, safeRecordCount, safeDelayFlushes));
         }
 
-        public void EnqueueNativeMoverBatch(IReadOnlyList<byte[]> packets, ushort componentId, int initialDelayFlushes = 0)
+        public void EnqueueNativeMoverBatch(IReadOnlyList<byte[]> packets, ushort componentId, int initialDelayFlushes = 0, Func<byte[], byte[]> serializer = null)
         {
             if (packets == null || packets.Count == 0 || componentId == 0)
                 return;
@@ -106,7 +109,7 @@ namespace DungeonRunners.Networking
                     int delayFlushes = !streamAdmitted && !terminalRecord
                         ? terminalRestartPending ? Math.Max(0, safeInitialDelayFlushes - 1) : safeInitialDelayFlushes
                         : 0;
-                    _queue.Enqueue(new QueueEntry(normalized[i], null, false, true, true, componentId, 1, delayFlushes: delayFlushes, nativeMoverBatchId: batchId));
+                    _queue.Enqueue(new QueueEntry(normalized[i], null, false, true, true, componentId, 1, delayFlushes: delayFlushes, nativeMoverBatchId: batchId, serializer: serializer));
                     streamAdmitted = !terminalRecord;
                     terminalRestartPending = terminalRecord;
                 }
@@ -248,6 +251,12 @@ namespace DungeonRunners.Networking
                             nativeMoverBatchEmitted[entry.NativeMoverComponentId] = entry.NativeMoverBatchId;
                     }
 
+                    if (entry.Serializer != null)
+                    {
+                        data = StripClientEntityWrapper(entry.Serializer(data));
+                        if (data.Length == 0)
+                            continue;
+                    }
                     messages.Add(data);
                     emittedRoles?.Add(entry.Role);
                 }
@@ -259,7 +268,7 @@ namespace DungeonRunners.Networking
 
         private static QueueEntry MaterializedEntry(QueueEntry entry, byte[] data)
         {
-            return new QueueEntry(data, null, false, entry.IsNativeMoverUpdate, entry.HasNativeMoverCadence, entry.NativeMoverComponentId, entry.NativeMoverRecords, entry.NativeMoverDelayFlushes, entry.DelayFlushes, entry.NativeMoverBatchId, entry.DeferredComponentId, entry.Role);
+            return new QueueEntry(data, null, false, entry.IsNativeMoverUpdate, entry.HasNativeMoverCadence, entry.NativeMoverComponentId, entry.NativeMoverRecords, entry.NativeMoverDelayFlushes, entry.DelayFlushes, entry.NativeMoverBatchId, entry.DeferredComponentId, entry.Role, entry.Serializer);
         }
 
         private static bool TryReadClientEntityComponentId(byte[] data, out ushort componentId)

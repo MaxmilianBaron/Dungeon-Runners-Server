@@ -201,7 +201,7 @@ public partial class CombatRuntime
             return ResolveHealthRatioF32(currentHPWire, maxHPWire) <= Math.Max(0, limitF32);
         }
 
-        public void CommitMonsterPrimarySkillUse(Monster monster, string source)
+        public void CommitMonsterPrimarySkillUse(Monster monster, string source, bool initialized = false)
         {
             if (monster == null || !monster.UsePrimaryActiveSkillThisAttack || string.IsNullOrWhiteSpace(monster.PrimaryActiveSkillPath))
                 return;
@@ -210,16 +210,20 @@ public partial class CombatRuntime
             var selected = monster.SelectedActiveSkill;
             if (selected == null)
                 return;
+            bool cooldownStartedAtInit = initialized && selected.InitUseResetsCooldown;
             if (monster.SilenceAttributeValue > 0
-                || selected.CooldownRemainingTicks != 0
+                || (selected.CooldownRemainingTicks != 0 && !cooldownStartedAtInit)
                 || monster.CurrentManaWire < selected.ManaCostWire)
             {
                 Debug.LogError($"[MON-SKILL-USE] {monster.Name}#{monster.EntityId} blocked skill={selected.Path ?? "none"} silence={monster.SilenceAttributeValue} cooldown={selected.CooldownRemainingTicks} mana={monster.CurrentManaWire} cost={selected.ManaCostWire} source={source ?? "unknown"} sourceFunction=ActiveSkill::validateUse@0x00538710");
                 return;
             }
             monster.ActiveSkillUseCommittedThisAttack = true;
-            selected.CooldownRemainingTicks = selected.CooldownTicks;
-            selected.CooldownLastTick = CombatTick;
+            if (!cooldownStartedAtInit)
+            {
+                selected.CooldownRemainingTicks = selected.CooldownTicks;
+                selected.CooldownLastTick = CombatTick;
+            }
             uint oldManaWire = monster.CurrentManaWire;
             monster.CurrentManaWire = oldManaWire - selected.ManaCostWire;
             if (monster.CurrentManaWire < oldManaWire)
@@ -724,12 +728,35 @@ public partial class CombatRuntime
             return true;
         }
 
-        public bool CommitMonsterAttackActionWireInput(Monster monster, CombatTarget target, byte sessionId, uint applyTick)
+        public bool CommitMonsterAttackActionWireInput(Monster monster, CombatTarget target, byte sessionId, uint applyTick, byte? useTargetManipulatorId = null)
         {
             if (monster == null || target == null || !monster.IsAlive || !target.IsAlive)
                 return false;
+            if (useTargetManipulatorId is byte manipulatorId
+                && FindMonsterActiveSkillManipulator(monster, manipulatorId) is { CooldownRemainingTicks: > 0 } skill)
+            {
+                if (monster.Behavior == null)
+                    return false;
+                monster.Behavior.OnDoActionFailed();
+                if (ServerDiagnostics.IsEnabled("verboseMonsterWireLogging"))
+                    Debug.LogError($"[MON-ATTACK-WIRE-INPUT] {monster.Name}#{monster.EntityId}->{target.Name} session={sessionId} applyTick={applyTick} result=action-failed message=8 reason=skill-cooldown manipulator={manipulatorId} cooldown={skill.CooldownRemainingTicks} sourceFunction=UseTarget::validateManipulator@0x005487E0->ActiveSkill::validateUse@0x005387A0");
+                return true;
+            }
             if (!monster.AttackPending || monster.AttackSessionId != sessionId)
-                return false;
+            {
+                if (monster.Behavior == null)
+                    return false;
+                bool weaponValid = ValidateMonsterWeaponUseTargetAction(
+                    monster,
+                    target,
+                    "ClientEntityManager::processMessage@0x005DA460->Behavior::processUpdate@0x00515620");
+                if (weaponValid && !monster.Behavior.CurrentActionInterruptLocked)
+                    return false;
+                monster.Behavior.OnDoActionFailed();
+                if (ServerDiagnostics.IsEnabled("verboseMonsterWireLogging"))
+                    Debug.LogError($"[MON-ATTACK-WIRE-INPUT] {monster.Name}#{monster.EntityId}->{target.Name} session={sessionId} applyTick={applyTick} result=action-failed message=8 reason={(weaponValid ? "interrupt-locked" : "weapon-validate")} sourceFunction=ClientEntityManager::processMessage@0x005DA460->Behavior::processUpdate@0x00515620->Behavior::doInterruptLocal@0x00515290->MonsterBehavior2::onDoActionFailed@0x00516860");
+                return true;
+            }
             if (monster.AttackCommitTick == 0
                 && (monster.Behavior?.AttackTarget2Active == true || monster.Behavior?.UseTargetActive == true))
             {

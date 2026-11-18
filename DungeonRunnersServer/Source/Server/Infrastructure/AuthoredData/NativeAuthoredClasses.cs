@@ -339,7 +339,14 @@ namespace DungeonRunners.Data
         {
             var definitions = new Dictionary<string, GCNode>(StringComparer.OrdinalIgnoreCase);
             foreach (string name in Parents.Keys)
-                definitions.Add(name, new GCNode { Name = name, CanonicalPath = name, NativeClassName = name, InheritanceResolved = true });
+                definitions.Add(name, new GCNode
+                {
+                    Name = name,
+                    CanonicalPath = name,
+                    NativeClassName = name,
+                    IsStatic = string.Equals(name, "ItemAttributeModifierDesc", StringComparison.OrdinalIgnoreCase),
+                    InheritanceResolved = true
+                });
             return definitions;
         }
 

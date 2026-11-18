@@ -164,9 +164,11 @@ namespace DungeonRunners.Database
                 using (var transaction = connection.BeginTransaction())
                 {
                     GameDatabase.ExecuteNonQuery(connection,
-                        @"INSERT INTO characters (account_id, name, class_name, avatar_class, level, experience, gold, current_zone)
-                          VALUES (@aid, @name, @class, @avatar, 0, 0, 100, 'tutorial')",
-                        ("@aid", (int)accountId), ("@name", name), ("@class", className), ("@avatar", avatarClass));
+                        @"INSERT INTO characters (account_id, name, class_name, avatar_class, level, experience, gold,
+                              current_zone, pvp_rating, pvp_rating_fraction)
+                          VALUES (@aid, @name, @class, @avatar, 0, 0, 100, 'tutorial', @pvpRating, 0)",
+                        ("@aid", (int)accountId), ("@name", name), ("@class", className), ("@avatar", avatarClass),
+                        ("@pvpRating", SavedCharacter.DefaultPvpRating));
 
                     int characterId = Convert.ToInt32(GameDatabase.ExecuteScalar(connection, "SELECT last_insert_rowid()"));
 
@@ -626,6 +628,7 @@ namespace DungeonRunners.Database
                 || !PvpResultRepository.IsValidParticipant(result)
                 || character.pvpWins != checked(result.WinsBefore + result.WinsDelta)
                 || character.pvpRating != (result.ApplyRating ? result.RatingAfter : result.PersistedRatingBefore)
+                || character.pvpRatingFraction != (result.ApplyRating ? result.RatingAfterFraction : result.PersistedRatingBeforeFraction)
                 || !string.Equals(character.currentZoneName, result.ReturnZone, StringComparison.OrdinalIgnoreCase)
                 || character.zoneId != result.ReturnZoneId
                 || character.positionFixedX != result.ReturnPosFixedX
@@ -986,7 +989,7 @@ namespace DungeonRunners.Database
                 || character.statIntellect < 0 || character.statIntellect > ushort.MaxValue
                 || character.statEndurance < 0 || character.statEndurance > ushort.MaxValue
                 || character.lastRespecTime < 0 || character.respecCount < 0
-                || character.pvpWins < 0 || character.pvpRating < 0 || character.pvpRating > 3000
+                || character.pvpWins < 0 || character.pvpRating < SavedCharacter.MinPvpRating || character.pvpRating > SavedCharacter.MaxPvpRating
                 || character.monsterDifficulty > 3 || character.minimumItemQuality < 1 || character.minimumItemQuality > 7
                 || character.posseJoinCooldown < 0 || character.posseRankId < 0 || character.posseRankId > 10)
                 throw new InvalidDataException($"Character numeric value is outside SQLite runtime range characterId={character.id}");
@@ -1110,13 +1113,14 @@ namespace DungeonRunners.Database
                             return true;
                         }
                         using var pvpBaselineCommand = connection.CreateCommand();
-                        pvpBaselineCommand.CommandText = @"SELECT c.pvp_wins, c.pvp_rating, a.username
+                        pvpBaselineCommand.CommandText = @"SELECT c.pvp_wins, c.pvp_rating, a.username, c.pvp_rating_fraction
                             FROM characters c JOIN accounts a ON a.id=c.account_id WHERE c.id=@characterId";
                         pvpBaselineCommand.Parameters.AddWithValue("@characterId", (int)expectedPvp.CharacterId);
                         using SqliteDataReader pvpBaselineReader = pvpBaselineCommand.ExecuteReader();
                         if (!pvpBaselineReader.Read()
                             || pvpBaselineReader.GetInt32(0) != expectedPvp.WinsBefore
                             || pvpBaselineReader.GetInt32(1) != expectedPvp.PersistedRatingBefore
+                            || pvpBaselineReader.GetInt32(3) != expectedPvp.PersistedRatingBeforeFraction
                             || !string.Equals(pvpBaselineReader.GetString(2), expectedPvp.LoginName, StringComparison.OrdinalIgnoreCase)
                             || pvpBaselineReader.Read())
                             throw new InvalidDataException($"PvP participant baseline changed resultId={expectedPvp.ResultId} order={expectedPvp.ParticipantOrder}");
@@ -1197,7 +1201,7 @@ namespace DungeonRunners.Database
                             stat_strength = @str, stat_agility = @agi,
                             stat_intellect = @int, stat_endurance = @end,
                             last_respec_time = @lrt,
-                            respec_count = @rsc, pvp_wins = @pvpw, pvp_rating = @pvpr,
+                            respec_count = @rsc, pvp_wins = @pvpw, pvp_rating = @pvpr, pvp_rating_fraction = @pvpFraction,
                             has_pvp_rating = MAX(has_pvp_rating, @hasPvpRating),
                             monster_difficulty = @difficulty, minimum_item_quality = @minimumQuality,
                             tp_zone = @tpz, tp_zone_id = @tpzid, tp_target_zone = @tptz,
@@ -1217,7 +1221,7 @@ namespace DungeonRunners.Database
                         ("@str", character.statStrength), ("@agi", character.statAgility),
                         ("@int", character.statIntellect), ("@end", character.statEndurance),
                         ("@lrt", character.lastRespecTime),
-                        ("@rsc", character.respecCount), ("@pvpw", character.pvpWins), ("@pvpr", character.pvpRating),
+                        ("@rsc", character.respecCount), ("@pvpw", character.pvpWins), ("@pvpr", character.pvpRating), ("@pvpFraction", character.pvpRatingFraction),
                         ("@hasPvpRating", character.hasPvpRating || pendingPvp?.Result.ApplyRating == true ? 1 : 0),
                         ("@difficulty", (int)character.monsterDifficulty), ("@minimumQuality", character.minimumItemQuality),
                         ("@tpz", character.tpZone ?? ""), ("@tpzid", character.tpZoneId),
@@ -1809,6 +1813,7 @@ namespace DungeonRunners.Database
                 respecCount = GameDatabase.GetInt(r, "respec_count"),
                 pvpWins = GameDatabase.GetInt(r, "pvp_wins"),
                 pvpRating = GameDatabase.GetInt(r, "pvp_rating"),
+                pvpRatingFraction = checked((byte)GameDatabase.GetInt(r, "pvp_rating_fraction")),
                 hasPvpRating = GameDatabase.GetInt(r, "has_pvp_rating") != 0,
                 monsterDifficulty = checked((byte)GameDatabase.GetInt(r, "monster_difficulty")),
                 minimumItemQuality = GameDatabase.GetInt(r, "minimum_item_quality", 1),

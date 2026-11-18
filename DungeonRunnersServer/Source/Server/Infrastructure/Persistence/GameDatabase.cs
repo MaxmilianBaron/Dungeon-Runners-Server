@@ -143,13 +143,13 @@ namespace DungeonRunners.Database
             ValidateTableSet(connection, "authored", AuthoredTables);
             ValidateTableSet(connection, "cache", CacheTables);
             ValidateRequiredColumns(connection, "main", "accounts", "id", "username", "password_hash", "salt", "is_member", "is_banned", "is_admin", "current_character_id");
-            ValidateRequiredColumns(connection, "main", "characters", "id", "account_id", "name", "class_name", "current_zone", "zone_id", "position_fixed_x", "position_fixed_y", "position_fixed_z", "current_hp", "current_mana", "max_hp", "max_mana", "has_pvp_rating", "monster_difficulty", "minimum_item_quality");
+            ValidateRequiredColumns(connection, "main", "characters", "id", "account_id", "name", "class_name", "current_zone", "zone_id", "position_fixed_x", "position_fixed_y", "position_fixed_z", "current_hp", "current_mana", "max_hp", "max_mana", "has_pvp_rating", "pvp_rating_fraction", "monster_difficulty", "minimum_item_quality");
             ValidateRequiredColumns(connection, "main", "character_inventory", "id", "character_id", "gc_class", "container_id", "item_order", "generated_item_modifiers", "soul_bound", "no_sell", "soul_bound_countdown");
             ValidateRequiredColumns(connection, "main", "character_equipment", "id", "character_id", "slot", "gc_class", "generated_item_modifiers", "soul_bound", "no_sell", "soul_bound_countdown");
             ValidateRequiredColumns(connection, "main", "dropped_items", "id", "gc_class", "quantity", "gold_amount", "generated_by_bling_gnome", "heading_fixed", "quest_binding_key", "activation_key", "generated_item_modifiers", "soul_bound", "no_sell", "soul_bound_countdown", "owner_group_id");
             ValidateRequiredColumns(connection, "main", "world_entity_activations", "activation_key", "character_id", "zone", "zone_id", "instance_id", "entity_id", "outcome_json", "activated_at");
             ValidateRequiredColumns(connection, "main", "pvp_match_results", "result_id", "match_id", "archetype", "has_winner", "participant_count", "created_at");
-            ValidateRequiredColumns(connection, "main", "pvp_participant_results", "result_id", "participant_order", "character_id", "login_name", "is_winner", "is_ranked", "rating_before", "rating_after", "persisted_rating_before", "apply_rating", "wins_before", "wins_delta", "reward_gc_class", "reward_count", "reward_width", "reward_height", "reward_rarity", "return_zone", "return_zone_id", "return_pos_fixed_x", "return_pos_fixed_y", "return_pos_fixed_z", "applied_at", "return_completed_at", "pending_grant_id");
+            ValidateRequiredColumns(connection, "main", "pvp_participant_results", "result_id", "participant_order", "character_id", "login_name", "is_winner", "is_ranked", "rating_before", "rating_after", "persisted_rating_before", "apply_rating", "wins_before", "wins_delta", "reward_gc_class", "reward_count", "reward_width", "reward_height", "reward_rarity", "return_zone", "return_zone_id", "return_pos_fixed_x", "return_pos_fixed_y", "return_pos_fixed_z", "applied_at", "return_completed_at", "pending_grant_id", "rating_before_fraction", "rating_after_fraction", "persisted_rating_before_fraction", "rating_outcome_percent_fixed32", "result_contract_version");
             ValidateRequiredColumns(connection, "authored", "entries", "entry_id", "entry_index", "type_code", "type_ordinal", "name", "package_crc", "stored_size", "package_offset", "decoded_size", "flags", "native_words", "decoded_sha1", "source_virtual_path");
             ValidateRequiredColumns(connection, "authored", "text_payloads", "entry_id", "text_value");
             ValidateRequiredColumns(connection, "authored", "binary_payloads", "entry_id", "data");
@@ -390,18 +390,24 @@ namespace DungeonRunners.Database
                      OR COALESCE(trim(p.login_name),'')='' OR length(p.login_name)>256
                      OR p.is_winner IS NULL OR p.is_winner NOT IN (0,1)
                      OR p.is_ranked IS NULL OR p.is_ranked NOT IN (0,1)
-                     OR p.rating_before IS NULL OR p.rating_before<0 OR p.rating_before>3000
-                     OR p.rating_after IS NULL OR p.rating_after<0 OR p.rating_after>3000
-                     OR p.persisted_rating_before IS NULL OR p.persisted_rating_before<0 OR p.persisted_rating_before>3000
+                     OR p.rating_before IS NULL OR p.rating_before< -8388608 OR p.rating_before>8388607
+                     OR p.rating_before_fraction IS NULL OR p.rating_before_fraction<0 OR p.rating_before_fraction>255
+                     OR p.rating_after IS NULL OR p.rating_after< -8388608 OR p.rating_after>8388607
+                     OR p.rating_after_fraction IS NULL OR p.rating_after_fraction<0 OR p.rating_after_fraction>255
+                     OR p.persisted_rating_before IS NULL OR p.persisted_rating_before< -8388608 OR p.persisted_rating_before>8388607
+                     OR p.persisted_rating_before_fraction IS NULL OR p.persisted_rating_before_fraction<0 OR p.persisted_rating_before_fraction>255
                      OR p.apply_rating IS NULL OR p.apply_rating NOT IN (0,1)
-                     OR (p.apply_rating=1 AND (p.is_ranked=0 OR m.has_winner=0))
-                     OR (p.apply_rating=0 AND p.rating_after<>p.rating_before)
+                     OR (p.apply_rating=1 AND (p.is_ranked=0 OR (m.has_winner=0 AND p.rating_outcome_percent_fixed32 IS NULL)))
+                     OR (p.rating_outcome_percent_fixed32 IS NOT NULL AND (p.apply_rating=0 OR p.rating_outcome_percent_fixed32 NOT IN (0,12800,25600) OR p.is_winner<>(p.rating_outcome_percent_fixed32=25600) OR (m.has_winner=1 AND p.rating_outcome_percent_fixed32=12800)))
+                     OR (p.apply_rating=0 AND (p.rating_after<>p.rating_before OR p.rating_after_fraction<>p.rating_before_fraction))
                      OR p.wins_before IS NULL OR p.wins_before<0 OR p.wins_before>2147483647
                      OR p.wins_delta IS NULL OR p.wins_delta NOT IN (0,1) OR p.wins_before>2147483647-p.wins_delta
-                     OR p.is_winner<>p.wins_delta
+                     OR p.result_contract_version IS NULL OR p.result_contract_version NOT IN (0,1)
+                     OR (p.result_contract_version=0 AND (p.is_winner<>p.wins_delta OR p.rating_outcome_percent_fixed32 IS NOT NULL))
+                     OR (p.result_contract_version=1 AND (p.apply_rating<>(p.rating_outcome_percent_fixed32 IS NOT NULL) OR p.wins_delta<>(p.is_ranked=1 AND (p.is_winner=1 OR COALESCE(p.rating_outcome_percent_fixed32=12800,0)))))
                      OR p.reward_gc_class IS NULL OR p.reward_count IS NULL OR p.reward_width IS NULL OR p.reward_height IS NULL OR p.reward_rarity IS NULL
                      OR (p.reward_count=0 AND (p.reward_gc_class<>'' OR p.reward_width<>0 OR p.reward_height<>0 OR p.reward_rarity<>-1))
-                     OR (p.reward_count<>0 AND (m.has_winner=0 OR p.is_ranked=0 OR COALESCE(trim(p.reward_gc_class),'')='' OR length(p.reward_gc_class)>1024 OR p.reward_count<1 OR p.reward_count>255 OR p.reward_width<1 OR p.reward_width>10 OR p.reward_height<1 OR p.reward_height>8 OR p.reward_rarity< -1 OR p.reward_rarity>5))
+                     OR (p.reward_count<>0 AND ((m.has_winner=0 AND NOT(p.result_contract_version=1 AND COALESCE(p.rating_outcome_percent_fixed32=12800,0))) OR p.is_ranked=0 OR COALESCE(trim(p.reward_gc_class),'')='' OR length(p.reward_gc_class)>1024 OR p.reward_count<1 OR p.reward_count>255 OR p.reward_width<1 OR p.reward_width>10 OR p.reward_height<1 OR p.reward_height>8 OR p.reward_rarity< -1 OR p.reward_rarity>5))
                      OR COALESCE(trim(p.return_zone),'')='' OR length(p.return_zone)>1024 OR p.return_zone_id IS NULL
                      OR p.return_pos_fixed_x IS NULL OR p.return_pos_fixed_y IS NULL OR p.return_pos_fixed_z IS NULL
                      OR (p.return_completed_at IS NOT NULL AND p.applied_at IS NULL)
@@ -427,7 +433,7 @@ namespace DungeonRunners.Database
             int invalidCharacterIdentity = Convert.ToInt32(ExecuteScalar(connection,
                 "SELECT COUNT(*) FROM characters WHERE COALESCE(trim(name),'')='' OR COALESCE(trim(class_name),'')='' OR COALESCE(trim(current_zone),'')=''"));
             int invalidCharacterNumeric = Convert.ToInt32(ExecuteScalar(connection,
-                "SELECT COUNT(*) FROM characters WHERE level IS NULL OR level<0 OR level>99 OR experience IS NULL OR experience<0 OR experience>2147483647 OR gold IS NULL OR gold<0 OR gold>2147483647 OR current_hp IS NULL OR current_hp<0 OR current_hp>2147483647 OR current_mana IS NULL OR current_mana<0 OR current_mana>2147483647 OR max_hp IS NULL OR max_hp<0 OR max_hp>2147483647 OR max_mana IS NULL OR max_mana<0 OR max_mana>2147483647 OR zone_id IS NULL OR zone_id< -2147483648 OR zone_id>2147483647 OR tp_zone_id IS NULL OR tp_zone_id< -2147483648 OR tp_zone_id>2147483647 OR posse_id IS NULL OR posse_id<0 OR posse_id>2147483647 OR stat_strength IS NULL OR stat_strength<0 OR stat_strength>65535 OR stat_agility IS NULL OR stat_agility<0 OR stat_agility>65535 OR stat_intellect IS NULL OR stat_intellect<0 OR stat_intellect>65535 OR stat_endurance IS NULL OR stat_endurance<0 OR stat_endurance>65535 OR last_respec_time IS NULL OR last_respec_time<0 OR last_respec_time>2147483647 OR respec_count IS NULL OR respec_count<0 OR respec_count>2147483647 OR pvp_wins IS NULL OR pvp_wins<0 OR pvp_wins>2147483647 OR pvp_rating IS NULL OR pvp_rating<0 OR pvp_rating>3000 OR posse_join_cooldown IS NULL OR posse_join_cooldown<0 OR posse_join_cooldown>2147483647 OR posse_rank_id IS NULL OR posse_rank_id<0 OR posse_rank_id>10"));
+                "SELECT COUNT(*) FROM characters WHERE level IS NULL OR level<0 OR level>99 OR experience IS NULL OR experience<0 OR experience>2147483647 OR gold IS NULL OR gold<0 OR gold>2147483647 OR current_hp IS NULL OR current_hp<0 OR current_hp>2147483647 OR current_mana IS NULL OR current_mana<0 OR current_mana>2147483647 OR max_hp IS NULL OR max_hp<0 OR max_hp>2147483647 OR max_mana IS NULL OR max_mana<0 OR max_mana>2147483647 OR zone_id IS NULL OR zone_id< -2147483648 OR zone_id>2147483647 OR tp_zone_id IS NULL OR tp_zone_id< -2147483648 OR tp_zone_id>2147483647 OR posse_id IS NULL OR posse_id<0 OR posse_id>2147483647 OR stat_strength IS NULL OR stat_strength<0 OR stat_strength>65535 OR stat_agility IS NULL OR stat_agility<0 OR stat_agility>65535 OR stat_intellect IS NULL OR stat_intellect<0 OR stat_intellect>65535 OR stat_endurance IS NULL OR stat_endurance<0 OR stat_endurance>65535 OR last_respec_time IS NULL OR last_respec_time<0 OR last_respec_time>2147483647 OR respec_count IS NULL OR respec_count<0 OR respec_count>2147483647 OR pvp_wins IS NULL OR pvp_wins<0 OR pvp_wins>2147483647 OR pvp_rating IS NULL OR pvp_rating< -8388608 OR pvp_rating>8388607 OR pvp_rating_fraction IS NULL OR pvp_rating_fraction<0 OR pvp_rating_fraction>255 OR posse_join_cooldown IS NULL OR posse_join_cooldown<0 OR posse_join_cooldown>2147483647 OR posse_rank_id IS NULL OR posse_rank_id<0 OR posse_rank_id>10"));
             invalidCharacterNumeric += Convert.ToInt32(ExecuteScalar(connection,
                 "SELECT COUNT(*) FROM characters WHERE has_pvp_rating IS NULL OR has_pvp_rating NOT IN (0,1)"));
             int invalidInventoryRows = Convert.ToInt32(ExecuteScalar(connection,
@@ -747,6 +753,7 @@ namespace DungeonRunners.Database
                 EnsureColumn(connection, "characters", "respec_count", "INTEGER DEFAULT 0");
                 EnsureColumn(connection, "characters", "pvp_wins", "INTEGER DEFAULT 0");
                 EnsureColumn(connection, "characters", "pvp_rating", "INTEGER DEFAULT 1500");
+                EnsureColumn(connection, "characters", "pvp_rating_fraction", "INTEGER NOT NULL DEFAULT 0 CHECK(pvp_rating_fraction BETWEEN 0 AND 255)");
                 EnsureColumn(connection, "characters", "has_pvp_rating", "INTEGER NOT NULL DEFAULT 0 CHECK(has_pvp_rating IN (0,1))");
                 EnsureColumn(connection, "characters", "monster_difficulty", "INTEGER NOT NULL DEFAULT 0 CHECK(monster_difficulty BETWEEN 0 AND 3)");
                 EnsureColumn(connection, "characters", "minimum_item_quality", "INTEGER NOT NULL DEFAULT 1 CHECK(minimum_item_quality BETWEEN 1 AND 7)");
@@ -805,6 +812,12 @@ namespace DungeonRunners.Database
                     FOREIGN KEY (result_id) REFERENCES pvp_match_results(result_id) ON DELETE CASCADE,
                     FOREIGN KEY (character_id) REFERENCES characters(id) ON DELETE CASCADE
                 )");
+
+                EnsureColumn(connection, "pvp_participant_results", "rating_before_fraction", "INTEGER NOT NULL DEFAULT 0 CHECK(rating_before_fraction BETWEEN 0 AND 255)");
+                EnsureColumn(connection, "pvp_participant_results", "rating_after_fraction", "INTEGER NOT NULL DEFAULT 0 CHECK(rating_after_fraction BETWEEN 0 AND 255)");
+                EnsureColumn(connection, "pvp_participant_results", "persisted_rating_before_fraction", "INTEGER NOT NULL DEFAULT 0 CHECK(persisted_rating_before_fraction BETWEEN 0 AND 255)");
+                EnsureColumn(connection, "pvp_participant_results", "rating_outcome_percent_fixed32", "INTEGER CHECK(rating_outcome_percent_fixed32 IN (0,12800,25600))");
+                EnsureColumn(connection, "pvp_participant_results", "result_contract_version", "INTEGER NOT NULL DEFAULT 0 CHECK(result_contract_version IN (0,1))");
 
                 ExecuteNonQuery(connection, @"CREATE TABLE IF NOT EXISTS pending_admin_actions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,

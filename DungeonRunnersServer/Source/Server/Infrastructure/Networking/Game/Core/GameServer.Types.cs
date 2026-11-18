@@ -336,6 +336,7 @@ namespace DungeonRunners.Networking
             public bool IsGoldDrop;
             public uint GoldAmount;
             public bool GeneratedByBlingGnome;
+            internal Dictionary<int, ushort> GoldPilePublishedZoneAddresses;
         }
         private Dictionary<ushort, DroppedItemInfo> _droppedItems = new Dictionary<ushort, DroppedItemInfo>();
         private readonly List<ushort> _droppedItemOrder = new List<ushort>();
@@ -1465,8 +1466,9 @@ namespace DungeonRunners.Networking
                     int skillLevel = GetPlayerSkillLevel(pending.Conn, pending.Spell);
                     if (pending.Spell.UsesWeaponArcHitContext(skillLevel))
                     {
-                        HeadingVectorFixed(effectHeadingFixed, out directionFixedX, out directionFixedY);
-                        directionResolved = directionFixedX != 0 || directionFixedY != 0;
+                        HeadingVectorFixed(effectHeadingFixed, out int headingFixedX, out int headingFixedY);
+                        directionResolved = PathMap.TryBuildNativeRayDirectionFixed(
+                            headingFixedX, headingFixedY, out directionFixedX, out directionFixedY, out _);
                     }
                     else
                     {
@@ -1963,6 +1965,7 @@ namespace DungeonRunners.Networking
                     : 0u;
             _unitContainer?.ClearConnectionRuntime(conn, "CancelPendingCombatForConnection", preserveAttributeModifiers);
             _equipment?.ClearPendingAdmissions(conn);
+            ClearPendingHeroStatInputs(conn);
             ClearPendingUseTargetBehaviorAction(conn);
             _pendingGroupGotoWarpInputs.RemoveAll(input => input.ConnId == conn.ConnId);
             _pendingPlayerUseTargetActionInputs.RemoveAll(input => input.ConnId == conn.ConnId);
@@ -2066,11 +2069,11 @@ namespace DungeonRunners.Networking
                 ? Math.Max(0, state.WeaponProjectileSizeF32)
                 : spell != null ? Math.Max(0, spell.ProjectileSizeF32) : 0;
             int maxDistanceF32 = weaponProjectileRuntime
-                ? CombatRuntime.Instance.ResolvePlayerRangedProjectileRangeF32(state, monster)
+                ? unchecked((ushort)(state.WeaponRangeF32 >> 8)) << 8
                 : spell != null && sizeF32 > 0 && speedF32 > 0
                     ? ResolveProjectileMaxDistanceF32(spell, aimDistanceF32)
                 : Math.Max(0, hitDistanceHintF32);
-            if (maxDistanceF32 <= 0)
+            if (maxDistanceF32 <= 0 && !weaponProjectileRuntime)
                 maxDistanceF32 = Math.Max(1, aimDistanceF32);
 
             bool projectileRuntimeInitialized = spell != null && sizeF32 > 0 && speedF32 > 0;
@@ -2079,18 +2082,20 @@ namespace DungeonRunners.Networking
                 : startsAfterSkillsChild
                     ? ResolveActiveSkillEffectTickAfterSkillsChild(skillUseTick, spell, state)
                     : ResolveActiveSkillEffectTickBeforeSkillsChild(skillUseTick, spell, state);
-            int maxLifetimeTicks = spell != null && sizeF32 > 0 && speedF32 > 0
-                ? Combat.WeaponUseRuntime.ProjectileFlightTicksFixed32(maxDistanceF32, speedF32)
-                : 1;
+            int maxLifetimeTicks = weaponProjectileRuntime
+                ? Combat.WeaponUseRuntime.ProjectileDescriptorLifetimeTicks(maxDistanceF32, speedF32)
+                : spell != null && sizeF32 > 0 && speedF32 > 0
+                    ? Combat.WeaponUseRuntime.ProjectileFlightTicksFixed32(maxDistanceF32, speedF32)
+                    : 1;
             int stepDistanceF32 = spell != null && sizeF32 > 0 && speedF32 > 0
                 ? Combat.WeaponUseRuntime.ProjectileStepDistanceF32(speedF32)
                 : 0;
             int offsetF32 = weaponProjectileRuntime
                 ? Combat.WeaponUseRuntime.ProjectileInitialDistanceF32(CombatRuntime.Instance.ResolveAvatarUnitBehaviorRadiusF32())
                 : spell != null ? Math.Max(0, spell.ProjectileOffsetF32) : 0;
-            int initialDistanceF32 = spell != null && sizeF32 > 0 && speedF32 > 0
-                ? Math.Min(maxDistanceF32, offsetF32)
-                : 0;
+            int initialDistanceF32 = weaponProjectileRuntime
+                ? offsetF32
+                : spell != null && sizeF32 > 0 && speedF32 > 0 ? Math.Min(maxDistanceF32, offsetF32) : 0;
             hitDistanceHintF32 = Math.Max(0, hitDistanceHintF32);
             int resolvedHitDistanceF32 = hitDistanceHintF32 > 0
                 ? Math.Min(hitDistanceHintF32, maxDistanceF32)
@@ -2178,12 +2183,20 @@ namespace DungeonRunners.Networking
                 int maxDistanceF32 = pending.MaxDistanceF32 > 0
                     ? pending.MaxDistanceF32
                     : 1;
-                int afterDistanceF32 = Math.Min(maxDistanceF32, beforeDistanceF32 + Math.Max(1, stepDistanceF32));
+                int afterDistanceF32 = beforeDistanceF32 + Math.Max(1, stepDistanceF32);
+                if (!pending.WeaponProjectileRuntime)
+                    afterDistanceF32 = Math.Min(maxDistanceF32, afterDistanceF32);
                 pending.UpdatesCompleted++;
                 pending.LastUpdateTick = updateTick;
 
-                if (TryResolvePendingSpellTargetAlongSegment(ref pending, beforeDistanceF32, afterDistanceF32, out Combat.Monster target, out int hitDistanceF32, out bool worldBlocked))
+                if (TryResolvePendingSpellTargetAlongSegment(ref pending, beforeDistanceF32, afterDistanceF32,
+                    out Combat.Monster target, out int hitDistanceF32, out bool worldBlocked, out bool expired))
                 {
+                    if (expired)
+                    {
+                        Debug.LogError($"[SPELL-PROJECTILE] expired no-hit spell={spell.DisplayName ?? spell.SkillId ?? "spell"} seq={pending.Sequence} tick={updateTick} updates={pending.UpdatesCompleted}/{pending.MaxLifetimeTicks} sourceFunction=Projectile::update lifetime-zero-before-unit-check");
+                        return true;
+                    }
                     if (worldBlocked && target == null)
                     {
                         pending.ProjectileHitDistanceF32 = Math.Max(0, hitDistanceF32);
@@ -2203,12 +2216,14 @@ namespace DungeonRunners.Networking
                     int projectileRadiusF32 = WeaponUseRuntime.ProjectileRadiusFromAuthoredSizeF32(pending.ProjectileSizeF32);
                     Debug.LogError($"[SPELL-PROJECTILE] subentity impact spell={spell.DisplayName ?? spell.SkillId ?? "spell"} seq={pending.Sequence} target={target.Name}#{target.EntityId} segmentF32={beforeDistanceF32}->{afterDistanceF32} hitDistF32={hitDistanceF32} tick={updateTick} updates={pending.UpdatesCompleted}/{pending.MaxLifetimeTicks} radiusF32={hitRadiusF32} projectileRadiusF32={projectileRadiusF32} worldBlocked={worldBlocked} source={source ?? "unknown"}");
                     if (target.IsAlive && CombatRuntime.Instance.PeekMonsterCurrentHPWire(target) != 0)
-                        HandleSpellAttack(pending.Conn, pending.State, target, pending.ManipId, pending.UseFlags, "SpellProjectile", false, pending.SkillUseCommitted);
+                        HandleSpellAttack(pending.Conn, pending.State, target, pending.ManipId, pending.UseFlags,
+                            "SpellProjectile", false, pending.SkillUseCommitted, usePositionProjectileImpact: pending.QueuedWithoutInitialTarget);
                     return true;
                 }
 
                 pending.CurrentDistanceF32 = afterDistanceF32;
-                if (pending.CurrentDistanceF32 >= maxDistanceF32 || pending.UpdatesCompleted >= pending.MaxLifetimeTicks)
+                if (!pending.WeaponProjectileRuntime
+                    && (pending.CurrentDistanceF32 >= maxDistanceF32 || pending.UpdatesCompleted >= pending.MaxLifetimeTicks))
                 {
                     Debug.LogError($"[SPELL-PROJECTILE] expired no-hit spell={spell.DisplayName ?? spell.SkillId ?? "spell"} seq={pending.Sequence} manip={pending.ManipId} aimFixed=({pending.AimFixedX},{pending.AimFixedY}) currentF32={pending.CurrentDistanceF32}/{pending.MaxDistanceF32} updates={pending.UpdatesCompleted}/{pending.MaxLifetimeTicks} tick={updateTick} source={source ?? "unknown"} sourceFunction=Projectile::update range-end");
                     return true;
@@ -2218,11 +2233,13 @@ namespace DungeonRunners.Networking
             return false;
         }
 
-        private bool TryResolvePendingSpellTargetAlongSegment(ref PendingSpell pending, int segmentStartF32, int segmentEndF32, out Combat.Monster hitMonster, out int hitDistanceF32, out bool worldBlocked)
+        private bool TryResolvePendingSpellTargetAlongSegment(ref PendingSpell pending, int segmentStartF32, int segmentEndF32,
+            out Combat.Monster hitMonster, out int hitDistanceF32, out bool worldBlocked, out bool expired)
         {
             hitMonster = null;
             hitDistanceF32 = Math.Max(0, segmentEndF32);
             worldBlocked = false;
+            expired = false;
             Combat.SpellData spell = pending.Spell;
             if (spell == null || pending.Conn == null)
                 return false;
@@ -2280,8 +2297,25 @@ namespace DungeonRunners.Networking
                 && projectilePathMap.TryGetHeightAtFixed(segmentStartFixedX, segmentStartFixedY, out startTerrainFixedZ);
             bool endHeightResolved = projectilePathMap != null
                 && projectilePathMap.TryGetHeightAtFixed(segmentEndFixedX, segmentEndFixedY, out endTerrainFixedZ);
+            int ungroundedFixedZ = segmentEndFixedZ;
             if (endHeightResolved)
                 segmentEndFixedZ = endTerrainFixedZ + pending.GroundOffsetFixedZ;
+            if (pending.WeaponProjectileRuntime)
+            {
+                int heightDeltaFixed = segmentEndFixedZ - ungroundedFixedZ;
+                if (heightDeltaFixed > 0x0A00)
+                {
+                    worldBlocked = true;
+                    return true;
+                }
+                if (heightDeltaFixed < -0x0A00)
+                    segmentEndFixedZ = ungroundedFixedZ;
+                else if (pending.UpdatesCompleted >= pending.MaxLifetimeTicks)
+                {
+                    expired = true;
+                    return true;
+                }
+            }
             if (pending.ProjectileGeometryInitialized)
                 Debug.LogError($"[SPELL-PROJECTILE] subentity update spell={pending.Spell?.DisplayName ?? pending.Spell?.SkillId ?? "spell"} seq={pending.Sequence} update={pending.UpdatesCompleted} positionFixed=({segmentEndFixedX},{segmentEndFixedY},{segmentEndFixedZ}) velocityFixed=({pending.VelocityFixedX},{pending.VelocityFixedY},{pending.VelocityFixedZ}) terrainFixedZ=({(startHeightResolved ? startTerrainFixedZ : segmentStartFixedZ)},{(endHeightResolved ? endTerrainFixedZ : segmentEndFixedZ)}) distanceFixed={segmentEndFixed}");
             int maxDistanceF32 = pending.MaxDistanceF32 > 0

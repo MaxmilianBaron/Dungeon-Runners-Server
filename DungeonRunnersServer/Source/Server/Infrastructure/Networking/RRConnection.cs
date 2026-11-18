@@ -278,6 +278,15 @@ namespace DungeonRunners.Networking
         public bool FullHPBaselineOnNextSpawn { get; set; } = false;
         public bool RespawnFullHPPending { get; set; } = false;
         public bool AllowFlush { get; set; } = false;
+        public ushort ZoneSourceAddressId { get; private set; } = 0x000F;
+        public ushort? CompletedZoneErrorRespawnAddress { get; set; }
+        public bool CanAdvanceZoneSourceAddress => ZoneSourceAddressId < ushort.MaxValue;
+
+        public void AdvanceZoneSourceAddress()
+        {
+            ZoneSourceAddressId = checked((ushort)(ZoneSourceAddressId + 1));
+        }
+
         public bool PortalClientEntityEpochClosing { get; set; } = false;
         public uint PendingPortalTransitionResponseWriterSerial { get; set; } = 0;
 

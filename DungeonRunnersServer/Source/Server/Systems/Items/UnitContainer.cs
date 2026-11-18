@@ -4,6 +4,7 @@ using DungeonRunners.Engine;
 using DungeonRunners.Data;
 using DungeonRunners.Combat;
 using DungeonRunners.Database;
+using DungeonRunners.Gameplay;
 using System;
 using System.Linq;
 
@@ -75,7 +76,7 @@ namespace DungeonRunners.Networking
                     ProcessDropItem(conn, reader, componentId);
                     break;
                 case 0x25:
-                    ProcessUseItem(conn, reader, componentId);
+                    ProcessUseItem(conn, reader, componentId, allowNativeSlotOnly: true);
                     break;
                 case 0x26:
                     ProcessUseItemPosition(conn, reader, componentId);
@@ -95,9 +96,9 @@ namespace DungeonRunners.Networking
             }
         }
 
-        private void ProcessUseItem(RRConnection conn, LEReader reader, ushort componentId)
+        private void ProcessUseItem(RRConnection conn, LEReader reader, ushort componentId, bool allowNativeSlotOnly = false)
         {
-            if (!TryReadUseItemRequest(reader, out uint clientItemId, out uint requestedTypeId, out string requestedPacketGcClass))
+            if (!TryReadUseItemRequest(reader, allowNativeSlotOnly, out uint clientItemId, out uint requestedTypeId, out string requestedPacketGcClass))
             {
                 Debug.LogError("[USE-ITEM] reason=invalid-item-payload");
                 return;
@@ -121,12 +122,15 @@ namespace DungeonRunners.Networking
             byte itemY = itemData.Value.y;
             string gcLower = item.GCClass.ToLower();
 
-            uint storedPacketTypeId = GCTypeCodec.HashString(GCObject.GetPacketGCClassFor(item.GCClass));
-            uint storedItemTypeId = GCTypeCodec.HashString(item.GCClass);
-            if (requestedTypeId != storedPacketTypeId && requestedTypeId != storedItemTypeId)
+            if (requestedTypeId != 0)
             {
-                Debug.LogError($"[USE-ITEM] clientItemId={clientItemId} requested=0x{requestedTypeId:X8} storedPacket=0x{storedPacketTypeId:X8} storedItem=0x{storedItemTypeId:X8} reason=item-type-mismatch");
-                return;
+                uint storedPacketTypeId = GCTypeCodec.HashString(GCObject.GetPacketGCClassFor(item.GCClass));
+                uint storedItemTypeId = GCTypeCodec.HashString(item.GCClass);
+                if (requestedTypeId != storedPacketTypeId && requestedTypeId != storedItemTypeId)
+                {
+                    Debug.LogError($"[USE-ITEM] clientItemId={clientItemId} requested=0x{requestedTypeId:X8} storedPacket=0x{storedPacketTypeId:X8} storedItem=0x{storedItemTypeId:X8} reason=item-type-mismatch");
+                    return;
+                }
             }
 
             Debug.LogError($"[USE-ITEM] item={item.GCClass} pos=({itemX},{itemY}) slot={actualSlot}");
@@ -319,13 +323,19 @@ namespace DungeonRunners.Networking
             }
         }
 
-        private static bool TryReadUseItemRequest(LEReader reader, out uint itemSlotId, out uint typeId, out string packetGcClass)
+        private static bool TryReadUseItemRequest(LEReader reader, bool allowNativeSlotOnly, out uint itemSlotId, out uint typeId, out string packetGcClass)
         {
             itemSlotId = 0;
             typeId = 0;
             packetGcClass = null;
             if (reader == null || reader.Remaining < 1)
                 return false;
+
+            if (allowNativeSlotOnly && reader.Remaining == sizeof(uint))
+            {
+                itemSlotId = reader.ReadUInt32();
+                return true;
+            }
 
             byte typeTag = reader.ReadByte();
             switch (typeTag)
@@ -377,10 +387,8 @@ namespace DungeonRunners.Networking
         {
             previousStackCount = _server.GetStackCount(connectionId, slot);
             remainingCount = 0;
-            ItemData itemData = AuthoredGameplayCatalog.FindItem(item.GCClass);
-            itemWidth = itemData?.inventoryWidth ?? 0;
-            itemHeight = itemData?.inventoryHeight ?? 0;
-            if (itemData == null || previousStackCount <= 0 || itemWidth <= 0 || itemWidth > 10 || itemHeight <= 0 || itemHeight > 8)
+            (itemWidth, itemHeight) = MerchantRuntime.GetItemDimensions(item.GCClass);
+            if (previousStackCount <= 0 || itemWidth <= 0 || itemWidth > 10 || itemHeight <= 0 || itemHeight > 8)
                 return false;
             if (previousStackCount > 1)
             {

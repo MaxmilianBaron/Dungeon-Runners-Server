@@ -1060,7 +1060,7 @@ namespace DungeonRunners.Combat
                 || GetMonster(pending.MonsterEntityId) != monster
                 || !string.Equals(RoomRuntime.NormalizeInstanceKey(monster.InstanceKey), pending.InstanceKey, StringComparison.OrdinalIgnoreCase))
             {
-                RemoveMonsterActiveSkillProjectileAt(projectileIndex, pending);
+                RemoveMonsterProjectileAt(projectileIndex, pending);
                 return;
             }
             if (nowTick <= pending.LastUpdateTick)
@@ -1075,7 +1075,7 @@ namespace DungeonRunners.Combat
             if (pending.UpdatesCompleted >= pending.MaxLifetimeTicks)
             {
                 Debug.LogError($"[MON-SKILL-PROJECTILE] expire source={monster.Name}#{monster.EntityId} seq={pending.Sequence} tick={nowTick} distanceF32={pending.CurrentDistanceF32}/{pending.MaxDistanceF32} updates={pending.UpdatesCompleted}/{pending.MaxLifetimeTicks} reason=lifespan sourceFunction=SpellProjectile::update@0x00555790");
-                RemoveMonsterActiveSkillProjectileAt(projectileIndex, pending);
+                RemoveMonsterProjectileAt(projectileIndex, pending);
                 return;
             }
             int beforeDistanceF32 = Math.Max(0, pending.CurrentDistanceF32);
@@ -1163,14 +1163,14 @@ namespace DungeonRunners.Combat
                 pending.RemainingPenetrations--;
                 if (!pending.Penetrate || pending.RemainingPenetrations <= 0)
                 {
-                    RemoveMonsterActiveSkillProjectileAt(projectileIndex, pending);
+                    RemoveMonsterProjectileAt(projectileIndex, pending);
                     return;
                 }
             }
             if (worldHit != null)
             {
                 Debug.LogError($"[MON-SKILL-PROJECTILE] world-impact source={monster.Name}#{monster.EntityId} seq={pending.Sequence} tick={nowTick} pointFixed=({worldHit.WorldFixedX},{worldHit.WorldFixedY},{worldHit.WorldFixedZ}) segmentDistanceF32={worldImpactDistanceFixed} object={worldHit.ObjectPath ?? "none"} collision={worldHit.CollisionObject ?? "none"} hybrid={worldHit.Hybrid} hybridSource={worldHit.HybridSource ?? "none"} sourceFunction=ProjectileChecker::testFirstTime@0x0059A490->WorldCollisionObject::testCollision@0x004EAB00");
-                RemoveMonsterActiveSkillProjectileAt(projectileIndex, pending);
+                RemoveMonsterProjectileAt(projectileIndex, pending);
                 return;
             }
             pending.CurrentFixedX = nextFixedX;
@@ -1180,7 +1180,7 @@ namespace DungeonRunners.Combat
             if (pending.CurrentDistanceF32 >= pending.MaxDistanceF32 || pending.UpdatesCompleted >= pending.MaxLifetimeTicks)
             {
                 Debug.LogError($"[MON-SKILL-PROJECTILE] expire source={monster.Name}#{monster.EntityId} seq={pending.Sequence} tick={nowTick} distanceF32={pending.CurrentDistanceF32}/{pending.MaxDistanceF32} updates={pending.UpdatesCompleted}/{pending.MaxLifetimeTicks} reason=range-end sourceFunction=SpellProjectile::update@0x00555790");
-                RemoveMonsterActiveSkillProjectileAt(projectileIndex, pending);
+                RemoveMonsterProjectileAt(projectileIndex, pending);
             }
         }
 
@@ -1318,7 +1318,7 @@ namespace DungeonRunners.Combat
             return true;
         }
 
-        private void RemoveMonsterActiveSkillProjectileAt(int projectileIndex, PendingMonsterProjectileImpact pending)
+        private void RemoveMonsterProjectileAt(int projectileIndex, PendingMonsterProjectileImpact pending)
         {
             if (projectileIndex >= 0
                 && projectileIndex < _pendingMonsterProjectiles.Count
@@ -1571,16 +1571,22 @@ namespace DungeonRunners.Combat
                 return ApplyMonsterAuthoredAttributeModifier(target.Monster, modifier.ModifierPath, modifier.Attributes,
                     (int)modifier.DurationTicks, modifier.RemoveOnDeath, modifier.StackRule, modifier.PowerLevel,
                     sourceMonster.EntityId, modifier.SkillPath, modifier.EffectPath, modifier.SkillLevel, modifier.TerminateWhenHitChance);
-            string modifierKey = BuildPlayerRuntimeModifierKey(target.EntityId, sourceMonster.EntityId, modifier.ModifierPath, modifier.StackRule, CLIENT_RUNTIME_MODIFIER_SOURCE_IS_SELF);
-            bool replace = _playerModifierNetworkIds.ContainsKey(modifierKey);
-            bool stackAccepted = target.PlayerState.ShouldAcceptAttributeModifier(modifierKey, modifier.ModifierPath, modifier.StackRule, modifier.PowerLevel, modifier.DurationTicks);
-            if (!stackAccepted)
+            bool locallySimulated = string.Equals(modifier.ModifierPath, "skills.creature.CreatureRend.Modifier", StringComparison.OrdinalIgnoreCase);
+            byte sourceIsSelf = locallySimulated ? (byte)0 : CLIENT_RUNTIME_MODIFIER_SOURCE_IS_SELF;
+            string modifierKey = BuildPlayerRuntimeModifierKey(target.EntityId, sourceMonster.EntityId, modifier.ModifierPath, modifier.StackRule, sourceIsSelf);
+            bool replace = false;
+            uint modifierId = 0;
+            if (!locallySimulated)
             {
-                RaisePlayerModifierAdd(sourceMonster, target, modifierKey, modifier.ModifierPath, modifier.SkillLevel, modifier.PowerLevel, modifier.DurationTicks, CLIENT_RUNTIME_MODIFIER_SOURCE_IS_SELF, replace, modifier.SkillPath, modifier.EffectPath, source ?? marker ?? "SpellModEffect", "SpellModEffect::doEffect@0x00554460 Modifiers::processAddModifier@0x00502280", false);
-                return true;
+                replace = _playerModifierNetworkIds.ContainsKey(modifierKey);
+                if (!target.PlayerState.ShouldAcceptAttributeModifier(modifierKey, modifier.ModifierPath, modifier.StackRule, modifier.PowerLevel, modifier.DurationTicks))
+                {
+                    RaisePlayerModifierAdd(sourceMonster, target, modifierKey, modifier.ModifierPath, modifier.SkillLevel, modifier.PowerLevel, modifier.DurationTicks, sourceIsSelf, replace, modifier.SkillPath, modifier.EffectPath, source ?? marker ?? "SpellModEffect", "SpellModEffect::doEffect@0x00554460 Modifiers::processAddModifier@0x00502280", false);
+                    return true;
+                }
+                if (!TryAllocatePlayerModifierNetworkId(modifierKey, true, out modifierId))
+                    return false;
             }
-            if (!TryAllocatePlayerModifierNetworkId(modifierKey, true, out uint modifierId))
-                return false;
             bool applied = target.PlayerState.ApplyAuthoredAttributeModifier(
                 modifier.ModifierPath,
                 modifier.Attributes,
@@ -1595,13 +1601,15 @@ namespace DungeonRunners.Combat
                 modifier.StackRule,
                 modifier.TerminateWhenHitChance,
                 modifier.SkillLevel,
-                CLIENT_RUNTIME_MODIFIER_SOURCE_IS_SELF);
+                sourceIsSelf);
+            if (locallySimulated)
+                return true;
             if (!applied)
             {
                 ReleasePlayerModifierNetworkId(modifierKey, modifierId);
                 return false;
             }
-            RaisePlayerModifierAddWithId(sourceMonster, target, modifierKey, modifier.ModifierPath, modifierId, modifier.SkillLevel, modifier.PowerLevel, modifier.DurationTicks, CLIENT_RUNTIME_MODIFIER_SOURCE_IS_SELF, replace, modifier.SkillPath, modifier.EffectPath, source ?? marker ?? "SpellModEffect", "SpellModEffect::doEffect@0x00554460 Modifiers::processAddModifier@0x00502280");
+            RaisePlayerModifierAddWithId(sourceMonster, target, modifierKey, modifier.ModifierPath, modifierId, modifier.SkillLevel, modifier.PowerLevel, modifier.DurationTicks, sourceIsSelf, replace, modifier.SkillPath, modifier.EffectPath, source ?? marker ?? "SpellModEffect", "SpellModEffect::doEffect@0x00554460 Modifiers::processAddModifier@0x00502280");
             return true;
         }
 

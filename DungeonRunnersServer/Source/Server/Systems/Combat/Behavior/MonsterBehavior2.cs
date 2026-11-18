@@ -9,6 +9,7 @@ namespace DungeonRunners.Combat.Behavior
         uint RoomDraw(string site);
         bool DispatchUpdateTargets();
         bool DispatchThreatNear();
+        void MarkEncounterActive();
         MonsterBehavior2.ActionSlot DispatchUpdateSkills();
         MonsterBehavior2.ActionSlot ResolveAttackAction();
         MonsterBehavior2.SkillActionBinding CaptureSkillAction(MonsterBehavior2.ActionSlot action);
@@ -58,7 +59,15 @@ namespace DungeonRunners.Combat.Behavior
         bool ValidateAttackTarget2Action();
         bool DoAttackAction();
         bool DoUseAction();
-        bool DoUseTargetAction();
+        bool DoUseTargetAction(bool initialized);
+        bool HasBoundUseTarget(MonsterBehavior2.SkillActionBinding binding);
+        bool IsUseTargetClear { get; }
+        bool HasQueuedUseTargetMoverUpdates => false;
+        bool IsUseTargetApproachActive { get; }
+        bool TryInitializeUseTarget(bool enteringUse, out bool initialized);
+        void MoveToUseTarget(bool refresh);
+        void FaceUseTarget();
+        void StopUseTargetApproach();
         bool StartFleeAction();
         void UpdateFleeAction();
         bool FleeActionActive { get; }
@@ -110,6 +119,10 @@ namespace DungeonRunners.Combat.Behavior
             public int State = 0xffff;
             public int NextState = 0xffff;
             public bool TransitionPending;
+            public bool Initialized;
+            public bool WeaponInterrupt;
+            public bool Started;
+            public byte ApproachRefreshTicks;
 
             public void RequestState(int state)
             {
@@ -194,8 +207,6 @@ namespace DungeonRunners.Combat.Behavior
         private bool _attackTarget2Pending;
         private bool _attackTarget2State5Pending;
         private bool _attackTarget2ObservedAttack;
-        private bool _useTargetStarted;
-        private bool _useTargetObservedAttack;
         private int _attackUseIndex;
         private int _prevUseIndex;
         private ActionSlot _currentAction;
@@ -311,8 +322,6 @@ namespace DungeonRunners.Combat.Behavior
             _scanBestFixedY = 0;
             _attackTarget2Pending = false;
             _attackTarget2State5Pending = false;
-            _useTargetStarted = false;
-            _useTargetObservedAttack = false;
             _currentAction = ActionSlot.None;
             _alternateAction = ActionSlot.None;
             _pendingAction = ActionSlot.None;
@@ -366,8 +375,6 @@ namespace DungeonRunners.Combat.Behavior
             _attackTarget2Pending = false;
             _attackTarget2State5Pending = false;
             _attackTarget2ObservedAttack = false;
-            _useTargetStarted = false;
-            _useTargetObservedAttack = false;
             _currentAction = ActionSlot.None;
             _alternateAction = ActionSlot.None;
             _pendingAction = ActionSlot.None;
@@ -534,12 +541,7 @@ namespace DungeonRunners.Combat.Behavior
                 UpdateAttackTarget2Action(context, out attackTarget2UseStarted);
                 return;
             }
-            if (action == ActionSlot.UseTarget)
-            {
-                UpdateUseTargetAction(context);
-                return;
-            }
-            if (action == ActionSlot.Use)
+            if (action == ActionSlot.Use || action == ActionSlot.UseTarget)
             {
                 UpdateUseAction(context);
                 return;
@@ -584,32 +586,6 @@ namespace DungeonRunners.Combat.Behavior
                 TerminateCurrentAction(context);
         }
 
-        private void UpdateUseTargetAction(IMonsterBehaviorContext context)
-        {
-            if (!_useTargetObservedAttack)
-            {
-                _useTargetStarted = context.DoUseTargetAction();
-                if (!_useTargetStarted)
-                {
-                    TerminateCurrentAction(context);
-                    return;
-                }
-                _useTargetObservedAttack = context.AttackRuntimePending;
-                if (_useTargetObservedAttack && context.AttackTargetActionQueued)
-                    context.StartQueuedAttackTargetAction();
-                return;
-            }
-            if (context.AttackRuntimePending)
-            {
-                _useTargetObservedAttack = true;
-                if (context.AttackTargetActionQueued)
-                    context.StartQueuedAttackTargetAction();
-                return;
-            }
-            if (_useTargetObservedAttack)
-                TerminateCurrentAction(context);
-        }
-
         private void UpdateUseAction(IMonsterBehaviorContext context)
         {
             UseActionState action = _currentUseAction;
@@ -630,8 +606,13 @@ namespace DungeonRunners.Combat.Behavior
 
         private void DispatchUseActionState(IMonsterBehaviorContext context, UseActionState action, int evt, int messageId, int scope)
         {
-            if (!ReferenceEquals(_currentUseAction, action) || _currentAction != ActionSlot.Use)
+            if (!ReferenceEquals(_currentUseAction, action))
                 return;
+            if (_currentAction == ActionSlot.UseTarget)
+            {
+                DispatchUseTargetState(context, action, evt, messageId, scope);
+                return;
+            }
             if (!context.OwnerActionValid)
             {
                 TerminateCurrentAction(context);
@@ -655,6 +636,92 @@ namespace DungeonRunners.Combat.Behavior
             }
             else if (action.State == 4 && evt == EventEnter)
                 TerminateCurrentAction(context);
+        }
+
+        private void DispatchUseTargetState(IMonsterBehaviorContext context, UseActionState action, int evt, int messageId, int scope)
+        {
+            if (!context.OwnerActionValid || !context.HasBoundUseTarget(_currentSkillAction))
+            {
+                TerminateCurrentAction(context);
+                return;
+            }
+
+            if (evt == EventMessage && messageId == 0x17 && (scope == 0xffff || scope == action.State))
+            {
+                if (action.State != 24)
+                    action.RequestState(4);
+                return;
+            }
+
+            switch (action.State)
+            {
+                case 29 when evt == EventUpdate:
+                    if (context.IsUseTargetClear)
+                    {
+                        action.RequestState(24);
+                        break;
+                    }
+                    CheckUseTargetInitialization(context, action, false);
+                    if (!context.HasQueuedUseTargetMoverUpdates)
+                        action.RequestState(2);
+                    break;
+
+                case 2 when evt == EventEnter:
+                    context.MoveToUseTarget(false);
+                    action.ApproachRefreshTicks = 15;
+                    break;
+
+                case 2 when evt == EventUpdate:
+                    if (context.IsUseTargetClear)
+                    {
+                        action.RequestState(24);
+                        break;
+                    }
+                    CheckUseTargetInitialization(context, action, false);
+                    if (action.ApproachRefreshTicks != 0 && --action.ApproachRefreshTicks == 0)
+                    {
+                        context.MoveToUseTarget(true);
+                        action.ApproachRefreshTicks = 15;
+                    }
+                    if (!context.IsUseTargetApproachActive)
+                        action.RequestState(4);
+                    break;
+
+                case 24 when evt == EventEnter:
+                    if (!action.WeaponInterrupt && !CheckUseTargetInitialization(context, action, true))
+                        break;
+                    if (!context.HasQueuedUseTargetMoverUpdates)
+                        context.StopUseTargetApproach();
+                    action.Started = context.DoUseTargetAction(action.Initialized);
+                    if (!action.Started)
+                        action.RequestState(4);
+                    break;
+
+                case 24 when evt == EventUpdate:
+                    context.FaceUseTarget();
+                    bool busy = action.WeaponInterrupt ? context.AttackRuntimePending : context.IsCurrentActionBusy(ActionSlot.UseTarget);
+                    if (!busy)
+                        action.RequestState(4);
+                    break;
+
+                case 4 when evt == EventEnter:
+                    if (!context.HasQueuedUseTargetMoverUpdates)
+                        context.StopUseTargetApproach();
+                    TerminateCurrentAction(context);
+                    break;
+            }
+        }
+
+        private static bool CheckUseTargetInitialization(IMonsterBehaviorContext context, UseActionState action, bool enteringUse)
+        {
+            if (action.Initialized)
+                return true;
+            if (!context.TryInitializeUseTarget(enteringUse, out action.Initialized))
+            {
+                action.RequestState(4);
+                return false;
+            }
+            return true;
         }
 
         private void PromotePendingAction(IMonsterBehaviorContext context)
@@ -945,6 +1012,7 @@ namespace DungeonRunners.Combat.Behavior
                     if (ev == EventEnter)
                     {
                         CombatTimer = 300;
+                        context.MarkEncounterActive();
                         if (HasPrimaryTarget(context))
                         {
                             bool wanderActionTerminated = context.ConsumeWanderActionTermination();
@@ -1137,15 +1205,18 @@ namespace DungeonRunners.Combat.Behavior
             ReleaseAlternateAction();
             _alternateAction = _currentAction;
             _alternateSkillAction = _currentSkillAction;
+            _alternateUseAction = _currentUseAction;
             _alternateDamageReactionActionId = _currentDamageReactionActionId;
             _currentAction = ActionSlot.UseTarget;
             _currentSkillAction = context.CaptureSkillAction(ActionSlot.UseTarget);
             _currentActionInterruptLocked = true;
             _currentDamageReactionActionId = 0;
-            _useTargetStarted = context.DoUseTargetAction();
-            _useTargetObservedAttack = _useTargetStarted && context.AttackRuntimePending;
-            Debug.LogError($"[MON-ACTION-SLOT] entity={context.MonsterEntityId} event=use-target-weapon-interrupt tick={context.SimulationTick} current={_currentAction} alternate={_alternateAction} pending={_pendingAction} generation={_actionGeneration} interruptLocked={_currentActionInterruptLocked} sourceFunction=Behavior::doInterruptLocal@0x00515290->UseTarget::start@0x00547F20");
-            return _useTargetStarted;
+            var use = new UseActionState { WeaponInterrupt = true };
+            _currentUseAction = use;
+            use.RequestState(24);
+            ProcessUseAction(context, use, EventEnter);
+            Debug.LogError($"[MON-ACTION-SLOT] entity={context.MonsterEntityId} event=use-target-weapon-interrupt tick={context.SimulationTick} current={_currentAction} alternate={_alternateAction} pending={_pendingAction} generation={_actionGeneration} interruptLocked={_currentActionInterruptLocked} sourceFunction=Behavior::doInterruptLocal@0x00515290->UseTarget::start@0x00547F30");
+            return use.Started;
         }
 
         public bool ProcessAttackTarget2WeaponInterruptInput(IMonsterBehaviorContext context)
@@ -1500,20 +1571,30 @@ namespace DungeonRunners.Combat.Behavior
             }
             QueuePendingAction(action, skillAction: skillAction);
             Debug.LogError($"[MON-ACTION-SLOT] entity={context.MonsterEntityId} event=pending tick={context.SimulationTick} current={_currentAction} pending={_pendingAction} alternate={_alternateAction} sourceFunction=Behavior::doActionLocal@0x00515130");
-            bool currentBusy = _currentAction == ActionSlot.Use
-                ? action == ActionSlot.Use && _currentSkillAction.ManipulatorId == skillAction.ManipulatorId
-                : context.IsCurrentActionBusy(_currentAction);
-            Debug.LogError($"[MON-ACTION-BUSY] entity={context.MonsterEntityId} tick={context.SimulationTick} current={_currentAction} keepsRunning={currentBusy} interruptLocked={_currentActionInterruptLocked} pending={_pendingAction} sourceFunction=Behavior::doActionLocal@0x00515130");
-            if (!_currentActionInterruptLocked && !currentBusy)
+            bool keepsRunning = _currentAction switch
+            {
+                ActionSlot.Use => action == ActionSlot.Use && _currentSkillAction.ManipulatorId == skillAction.ManipulatorId,
+                ActionSlot.UseTarget => action == ActionSlot.UseTarget && IsRedundantUseTarget(_currentSkillAction, skillAction),
+                _ => context.IsCurrentActionBusy(_currentAction)
+            };
+            Debug.LogError($"[MON-ACTION-BUSY] entity={context.MonsterEntityId} tick={context.SimulationTick} current={_currentAction} keepsRunning={keepsRunning} interruptLocked={_currentActionInterruptLocked} pending={_pendingAction} sourceFunction=Behavior::doActionLocal@0x00515130");
+            if (!_currentActionInterruptLocked && !keepsRunning)
                 ShutdownCurrentAction(context);
             return true;
+        }
+
+        private static bool IsRedundantUseTarget(SkillActionBinding current, SkillActionBinding incoming)
+        {
+            return current.HasValue && incoming.HasValue && current.TargetEntityId == incoming.TargetEntityId
+                && (current.ManipulatorId == incoming.ManipulatorId
+                    || (current.ManipulatorId is 10 or 11 && incoming.ManipulatorId is 10 or 11));
         }
 
         private void StartCurrentAction(IMonsterBehaviorContext context, ActionSlot action, byte damageReactionActionId, bool interruptLocked, SkillActionBinding skillAction = default)
         {
             _currentAction = action;
             _currentSkillAction = skillAction;
-            _currentUseAction = action == ActionSlot.Use ? new UseActionState() : null;
+            _currentUseAction = action is ActionSlot.Use or ActionSlot.UseTarget ? new UseActionState() : null;
             _currentActionInterruptLocked = interruptLocked;
             _currentDamageReactionActionId = action == ActionSlot.DamageReaction ? damageReactionActionId : (byte)0;
             if ((action == ActionSlot.Use || action == ActionSlot.UseTarget) && !context.BindSkillAction(skillAction))
@@ -1555,8 +1636,6 @@ namespace DungeonRunners.Combat.Behavior
             }
             if (action == ActionSlot.UseTarget)
             {
-                _useTargetStarted = false;
-                _useTargetObservedAttack = false;
                 StartUseTargetAction(context);
                 return;
             }
@@ -1575,10 +1654,14 @@ namespace DungeonRunners.Combat.Behavior
 
         private void StartUseTargetAction(IMonsterBehaviorContext context)
         {
-            _useTargetStarted = context.DoUseTargetAction();
-            _useTargetObservedAttack = _useTargetStarted && context.AttackRuntimePending;
-            if (!_useTargetStarted)
+            if (!context.HasBoundUseTarget(_currentSkillAction))
+            {
                 TerminateCurrentAction(context);
+                return;
+            }
+            UseActionState use = _currentUseAction;
+            use.RequestState(context.IsUseTargetClear ? 24 : context.HasQueuedUseTargetMoverUpdates ? 29 : 2);
+            ProcessUseAction(context, use, EventEnter);
         }
 
         private void QueuePendingAction(ActionSlot action, byte damageReactionActionId = 0, SkillActionBinding skillAction = default)
@@ -1674,8 +1757,6 @@ namespace DungeonRunners.Combat.Behavior
             }
             if (action == ActionSlot.Use || action == ActionSlot.UseTarget)
             {
-                _useTargetStarted = false;
-                _useTargetObservedAttack = false;
                 context?.ClearUseTargetAction();
                 return;
             }
@@ -1730,7 +1811,7 @@ namespace DungeonRunners.Combat.Behavior
             if (_currentAction == ActionSlot.DamageReaction
                 && (_currentDamageReactionActionId == 0x0A || _currentDamageReactionActionId == 0x0B))
                 return;
-            if (_currentAction == ActionSlot.Use)
+            if (_currentAction is ActionSlot.Use or ActionSlot.UseTarget)
             {
                 _currentUseAction.Messages.SendMessageA(0x17, 0, 0);
                 return;

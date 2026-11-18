@@ -88,6 +88,9 @@ namespace DungeonRunners.Combat
         public int WeaponShotType;
         public int WeaponProjectileSpeedF32;
         public int WeaponProjectileSizeF32;
+        public int WeaponProjectileSourceOffsetX;
+        public int WeaponProjectileSourceOffsetY;
+        public int WeaponProjectileSourceOffsetZ = 0x0c00;
         public int WeaponRangeF32;
         public int WeaponClassId = 1;
         public int DamageTypeId = 0;
@@ -126,8 +129,6 @@ namespace DungeonRunners.Combat
         public bool ClientVisibleMoveTargetFixedInit;
         public int ClientVisibleHeadingFixed;
         public bool ClientVisibleHeadingInit;
-        public bool ClientVisibleMovingThisFrame;
-        public uint ClientVisibleMovingThisFrameTick;
         public int ChaseHeadingFixed;
         public bool ChaseHeadingInit;
         public int MoveInDirectionHeadingFixed;
@@ -149,6 +150,7 @@ namespace DungeonRunners.Combat
         public int LeashRangeF32;
         public int AttackRangeF32;
         public int UnitDescAttackRangeF32;
+        public int FleeRangeF32;
         public int ClientSyncToleranceF32;
         public int CollisionRadiusF32;
         public int BoundingBoxRadiusXYF32;
@@ -245,8 +247,6 @@ namespace DungeonRunners.Combat
         public uint FollowInputApplyTick;
         public uint FollowInputDirectPlayerWeaponHitTick;
         public uint FollowInputPlayerDamageTick;
-        public bool FollowAdmissionReachable = true;
-        public bool ProximityFollowAdmissionPending;
         public bool ProximityTargetScanMatched;
         public uint ProximityAttackInputApplyTick;
         public bool DeferredTargetScanMessagePending;
@@ -414,8 +414,6 @@ namespace DungeonRunners.Combat
         {
             TargetId = 0;
             AlertSourceEntityId = 0;
-            FollowAdmissionReachable = true;
-            ProximityFollowAdmissionPending = false;
             ProximityTargetScanMatched = false;
             ProximityAttackInputApplyTick = 0;
             LocalAttackActionUsePending = false;
@@ -472,6 +470,7 @@ namespace DungeonRunners.Combat
         public byte Id = 10;
         public int RangeF32;
         public int SpellUseRangeF32;
+        public int InitUseRangeF32 = 64000;
         public int SpellUseMinimumRangeF32 = -1;
         public string TargetType;
         public string SpellUse;
@@ -492,6 +491,7 @@ namespace DungeonRunners.Combat
         public string CastModifier;
         public bool InstantUse;
         public bool AddModifierWhileClosing;
+        public bool InitUseResetsCooldown;
         public bool IsPrimaryAttack;
     }
 

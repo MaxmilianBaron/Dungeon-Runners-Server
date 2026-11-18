@@ -424,7 +424,7 @@ namespace DungeonRunners.Networking
 
         private bool EvaluatePvpUseTargetTargetIsClear(RRConnection conn, PlayerState state, uint tickIndex, int actorFixedX, int actorFixedY, int actorFixedZ)
         {
-            if (!TryGetActivePvpTarget(conn, out RRConnection target, out _, out _))
+            if (!TryGetActivePvpTarget(conn, out RRConnection target, out _, out CombatPlayer targetPlayer))
                 return false;
             ResolvePvpTargetPosition(target, out int targetFixedX, out int targetFixedY, out int targetFixedZ);
             CombatPlayer sourcePlayer = conn.Avatar != null ? CombatRuntime.Instance.GetPlayer((uint)conn.Avatar.Id) : null;
@@ -440,7 +440,7 @@ namespace DungeonRunners.Networking
                 return false;
             int rangeF32 = skillAction
                 ? CombatRuntime.Instance.ResolvePlayerPvpSkillTargetClearRangeF32(spell)
-                : CombatRuntime.Instance.ResolvePlayerPvpWeaponTargetClearRangeF32(state);
+                : CombatRuntime.Instance.ResolvePlayerPvpWeaponTargetClearRangeF32(state, targetPlayer.PlayerState);
             bool passed;
             int distanceF32;
             bool pathClear;

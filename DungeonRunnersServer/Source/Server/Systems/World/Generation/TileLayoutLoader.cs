@@ -12,9 +12,19 @@ namespace DungeonRunners.Utilities
 
         public static TileLayout LoadAuthored(string tileTypeName)
         {
+            return LoadAuthored(tileTypeName, false);
+        }
+
+        public static TileLayout LoadAuthoredClientScene(string worldTypeName)
+        {
+            return LoadAuthored(worldTypeName, true);
+        }
+
+        private static TileLayout LoadAuthored(string tileTypeName, bool clientScene)
+        {
             if (string.IsNullOrWhiteSpace(tileTypeName))
                 throw new ArgumentException("Tile type is empty", nameof(tileTypeName));
-            string key = "authored:" + tileTypeName.Trim();
+            string key = (clientScene ? "client-scene:" : "authored:") + tileTypeName.Trim();
             lock (FileCacheLock)
             {
                 if (FileCache.TryGetValue(key, out TileLayout cached))
@@ -26,7 +36,7 @@ namespace DungeonRunners.Utilities
             if (root == null)
                 throw new InvalidDataException($"Authored tile not found: {tileTypeName}");
             var placements = new List<TilePlacement>();
-            Collect(root, placements);
+            Collect(root, placements, clientScene ? root.GetChild("Entities") : null);
             var parsed = new TileLayout(key, root.Extends, placements);
             lock (FileCacheLock)
             {
@@ -47,9 +57,9 @@ namespace DungeonRunners.Utilities
             return new TileLayout(sourceName, root.Extends, placements);
         }
 
-        private static void Collect(GCNode node, List<TilePlacement> output)
+        private static void Collect(GCNode node, List<TilePlacement> output, GCNode clearedEntities = null)
         {
-            if (node == null) return;
+            if (node == null || ReferenceEquals(node, clearedEntities)) return;
 
             if (node.IsAnonymous
                 && !string.IsNullOrEmpty(node.Extends)
@@ -65,7 +75,7 @@ namespace DungeonRunners.Utilities
             }
 
             foreach (GCNode child in node.EnumerateChildrenInOrder())
-                Collect(child, output);
+                Collect(child, output, clearedEntities);
         }
 
         private static bool TryParseVector3Fixed(string raw, out int xFixed, out int yFixed, out int zFixed)

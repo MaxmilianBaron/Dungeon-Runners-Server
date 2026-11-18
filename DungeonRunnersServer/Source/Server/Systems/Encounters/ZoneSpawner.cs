@@ -28,7 +28,7 @@ namespace DungeonRunners.Gameplay
             public bool Invalidated;
         }
 
-        private const int EncounterScanRadiusFloorF32 = 500 * 0x100;
+        private const int EncounterScanRadiusF32 = 500 * 0x100;
         private const int ENCOUNTER_SCAN_TICKS = 30;
 
         private readonly Dictionary<string, List<EncounterObject>> _encounterObjects
@@ -51,11 +51,8 @@ namespace DungeonRunners.Gameplay
             public List<DungeonSpawnData> Defs = new List<DungeonSpawnData>();
             public int CenterFixedX;
             public int CenterFixedY;
-            public int ScanRadiusF32;
-            public int MinFixedX;
-            public int MinFixedY;
-            public int MaxFixedX;
-            public int MaxFixedY;
+            public int CenterFixedZ;
+            public int HeadingFixed;
             public int ScanTimer;
             public bool Spawned;
             public int ChoiceIndex = -1;
@@ -527,7 +524,16 @@ namespace DungeonRunners.Gameplay
                 }
                 if (!byGroup.TryGetValue(key, out var encounter))
                 {
-                    encounter = new EncounterObject { GroupKey = key, ScanTimer = 0, Spawned = !deferred };
+                    bool hasMarker = spawnDef.placementRole == "authored-encounter" || spawnDef.placementRole == "local-fallback";
+                    encounter = new EncounterObject
+                    {
+                        GroupKey = key,
+                        Spawned = !deferred,
+                        CenterFixedX = hasMarker ? spawnDef.WorldOriginFixedX + spawnDef.LocalFixedX : spawnDef.PosFixedX,
+                        CenterFixedY = hasMarker ? spawnDef.WorldOriginFixedY + spawnDef.LocalFixedY : spawnDef.PosFixedY,
+                        CenterFixedZ = hasMarker ? spawnDef.LocalFixedZ : spawnDef.PosFixedZ,
+                        HeadingFixed = spawnDef.HeadingFixed
+                    };
                     byGroup[key] = encounter;
                     encounterOrder.Add(encounter);
                 }
@@ -545,21 +551,13 @@ namespace DungeonRunners.Gameplay
             for (int encounterIndex = 0; encounterIndex < encounterOrder.Count; encounterIndex++)
             {
                 EncounterObject encounter = encounterOrder[encounterIndex];
-                long sumFixedX = 0, sumFixedY = 0;
-                int choiceIndex = -1;
                 foreach (var spawnDef in encounter.Defs)
                 {
-                    sumFixedX += spawnDef.PosFixedX;
-                    sumFixedY += spawnDef.PosFixedY;
-                    if (choiceIndex < 0 && spawnDef.encounterChoiceIndex >= 0)
-                        choiceIndex = spawnDef.encounterChoiceIndex;
+                    if (spawnDef.encounterChoiceIndex < 0)
+                        continue;
+                    encounter.ChoiceIndex = spawnDef.encounterChoiceIndex;
+                    break;
                 }
-                encounter.CenterFixedX = (int)(sumFixedX / encounter.Defs.Count);
-                encounter.CenterFixedY = (int)(sumFixedY / encounter.Defs.Count);
-                encounter.ScanRadiusF32 = ResolveEncounterScanRadiusF32(encounter.Defs);
-                ResolveEncounterBoundsFixed(encounter.Defs, encounter.CenterFixedX, encounter.CenterFixedY, encounter.ScanRadiusF32,
-                    out encounter.MinFixedX, out encounter.MinFixedY, out encounter.MaxFixedX, out encounter.MaxFixedY);
-                encounter.ChoiceIndex = choiceIndex;
                 list.Add(encounter);
             }
             if (!CombatRuntime.Instance.TryAllocateEncounterObjectIds(list.Count, out uint[] encounterEntityIds))
@@ -606,7 +604,7 @@ namespace DungeonRunners.Gameplay
             return false;
         }
 
-        public bool TryGetDeferredEncounterObjectSpawnSnapshot(string instanceKey, uint entityId, out int posFixedX, out int posFixedY, out int posFixedZ, out int headingFixed)
+        public bool TryGetEncounterObjectSpawnSnapshot(string instanceKey, uint entityId, bool deferredOnly, out int posFixedX, out int posFixedY, out int posFixedZ, out int headingFixed)
         {
             posFixedX = 0;
             posFixedY = 0;
@@ -618,13 +616,12 @@ namespace DungeonRunners.Gameplay
                 return false;
             foreach (EncounterObject encounter in encounters)
             {
-                if (encounter.EntityId != entityId || encounter.Spawned || encounter.Defs.Count == 0)
+                if (encounter.EntityId != entityId || (deferredOnly && encounter.Spawned))
                     continue;
-                DungeonSpawnData first = encounter.Defs[0];
-                posFixedX = first.PosFixedX;
-                posFixedY = first.PosFixedY;
-                posFixedZ = first.PosFixedZ;
-                headingFixed = first.HeadingFixed;
+                posFixedX = encounter.CenterFixedX;
+                posFixedY = encounter.CenterFixedY;
+                posFixedZ = encounter.CenterFixedZ;
+                headingFixed = encounter.HeadingFixed;
                 return true;
             }
             return false;
@@ -642,84 +639,22 @@ namespace DungeonRunners.Gameplay
             _encounterObjects.Remove(instanceKey);
         }
 
-        private static int ResolveEncounterScanRadiusF32(List<DungeonSpawnData> defs)
+        internal static bool IsPlayerInEncounterRange(int centerFixedX, int centerFixedY, CombatPlayer player)
         {
-            int radiusF32 = 0;
-            if (defs != null)
-            {
-                foreach (var def in defs)
-                {
-                    if (def == null)
-                        continue;
-
-                    radiusF32 = Math.Max(radiusF32, ResolveEncounterExtentXF32(def));
-                    radiusF32 = Math.Max(radiusF32, ResolveEncounterExtentYF32(def));
-                }
-            }
-
-            return Math.Max(EncounterScanRadiusFloorF32, radiusF32);
+            if (player == null || player.EntityId == 0 || !CombatRuntime.UnitFinderScanContainsMembershipFixed(
+                centerFixedX, centerFixedY, EncounterScanRadiusF32, player.UnitFinderMembershipPosFixedX, player.UnitFinderMembershipPosFixedY))
+                return false;
+            int dx = unchecked(centerFixedX - player.ClientSimulationPosFixedX);
+            int dy = unchecked(centerFixedY - player.ClientSimulationPosFixedY);
+            int dz = player.ClientSimulationPosFixedZ;
+            int squared = unchecked((int)((((long)dx * dx) >> 8) + (((long)dy * dy) >> 8) + (((long)dz * dz) >> 8)));
+            return squared <= ((long)EncounterScanRadiusF32 * EncounterScanRadiusF32 >> 8);
         }
 
-        private static int ResolveEncounterExtentXF32(DungeonSpawnData def)
-        {
-            return def != null && def.PlaceholderSizeFixedX > 0
-                ? def.PlaceholderSizeFixedX / 2
-                : 0;
-        }
-
-        private static int ResolveEncounterExtentYF32(DungeonSpawnData def)
-        {
-            return def != null && def.PlaceholderSizeFixedY > 0
-                ? def.PlaceholderSizeFixedY / 2
-                : 0;
-        }
-
-        private static void ResolveEncounterBoundsFixed(List<DungeonSpawnData> defs, int centerFixedX, int centerFixedY, int scanRadiusF32,
-            out int minFixedX, out int minFixedY, out int maxFixedX, out int maxFixedY)
-        {
-            minFixedX = int.MaxValue;
-            minFixedY = int.MaxValue;
-            maxFixedX = int.MinValue;
-            maxFixedY = int.MinValue;
-
-            if (defs != null)
-            {
-                foreach (var def in defs)
-                {
-                    if (def == null)
-                        continue;
-
-                    int triggerFixedX = def.WorldOriginFixedX + def.LocalFixedX;
-                    int triggerFixedY = def.WorldOriginFixedY + def.LocalFixedY;
-                    if (def.placeholderIndex < 0 && triggerFixedX == 0 && triggerFixedY == 0)
-                    {
-                        triggerFixedX = def.PosFixedX;
-                        triggerFixedY = def.PosFixedY;
-                    }
-
-                    int halfF32X = ResolveEncounterExtentXF32(def);
-                    int halfF32Y = ResolveEncounterExtentYF32(def);
-                    minFixedX = Math.Min(minFixedX, triggerFixedX - halfF32X);
-                    minFixedY = Math.Min(minFixedY, triggerFixedY - halfF32Y);
-                    maxFixedX = Math.Max(maxFixedX, triggerFixedX + halfF32X);
-                    maxFixedY = Math.Max(maxFixedY, triggerFixedY + halfF32Y);
-                }
-            }
-
-            if (minFixedX == int.MaxValue)
-            {
-                int radiusF32 = scanRadiusF32 > 0 ? scanRadiusF32 : EncounterScanRadiusFloorF32;
-                minFixedX = centerFixedX - radiusF32;
-                minFixedY = centerFixedY - radiusF32;
-                maxFixedX = centerFixedX + radiusF32;
-                maxFixedY = centerFixedY + radiusF32;
-            }
-        }
-
-        public List<Monster> UpdateEncounterObject(uint entityId, string instanceKey, List<(int x, int y)> playerPositions)
+        public List<Monster> UpdateEncounterObject(uint entityId, string instanceKey, List<CombatPlayer> players)
         {
             var spawnedMonsters = new List<Monster>();
-            if (entityId == 0 || string.IsNullOrEmpty(instanceKey) || playerPositions == null || playerPositions.Count == 0)
+            if (entityId == 0 || string.IsNullOrEmpty(instanceKey) || players == null)
                 return spawnedMonsters;
             if (!_encounterObjects.TryGetValue(instanceKey, out var list) || list == null)
                 return spawnedMonsters;
@@ -744,23 +679,20 @@ namespace DungeonRunners.Gameplay
             }
             encounter.ScanTimer = ENCOUNTER_SCAN_TICKS;
 
-            int scanRadiusF32 = encounter.ScanRadiusF32 > 0 ? encounter.ScanRadiusF32 : EncounterScanRadiusFloorF32;
             bool playerInRange = false;
-            var scanPositionParts = new List<string>(playerPositions.Count);
-            foreach (var playerPosition in playerPositions)
+            foreach (CombatPlayer player in players)
             {
-                scanPositionParts.Add($"({playerPosition.x},{playerPosition.y})");
-                int nearestFixedX = Math.Clamp(playerPosition.x, encounter.MinFixedX, encounter.MaxFixedX);
-                int nearestFixedY = Math.Clamp(playerPosition.y, encounter.MinFixedY, encounter.MaxFixedY);
-                long ddx = (long)playerPosition.x - nearestFixedX;
-                long ddy = (long)playerPosition.y - nearestFixedY;
-                if (ddx * ddx + ddy * ddy <= (long)scanRadiusF32 * scanRadiusF32)
+                if (IsPlayerInEncounterRange(encounter.CenterFixedX, encounter.CenterFixedY, player))
                 {
                     playerInRange = true;
                     break;
                 }
             }
-            Debug.LogError($"[ENCOUNTER-LAZY-SCAN] instance='{instanceKey}' entity={entityId} group='{encounter.GroupKey}' tick={CombatRuntime.Instance.CombatTick} players={string.Join(",", scanPositionParts)} bounds=({encounter.MinFixedX},{encounter.MinFixedY})->({encounter.MaxFixedX},{encounter.MaxFixedY}) radiusF32={scanRadiusF32} result={(playerInRange ? "spawn" : "defer")} nextScanTicks={ENCOUNTER_SCAN_TICKS} positionLane=ClientSimulationPosFixed sourceFunction=EncounterObject::ScanForPlayer@0x00563000");
+            if (ServerDiagnostics.IsEnabled("encounterTracking"))
+            {
+                string positions = string.Join(",", players.Select(player => $"({player.ClientSimulationPosFixedX},{player.ClientSimulationPosFixedY},{player.ClientSimulationPosFixedZ})"));
+                Debug.LogError($"[ENCOUNTER-LAZY-SCAN] instance='{instanceKey}' entity={entityId} group='{encounter.GroupKey}' tick={CombatRuntime.Instance.CombatTick} players={positions} center=({encounter.CenterFixedX},{encounter.CenterFixedY},0) radiusF32={EncounterScanRadiusF32} result={(playerInRange ? "spawn" : "defer")} nextScanTicks={ENCOUNTER_SCAN_TICKS} positionLane=ClientSimulationPosFixed sourceFunction=EncounterObject::ScanForPlayer@0x00563000");
+            }
             if (!playerInRange)
                 return spawnedMonsters;
 
@@ -821,7 +753,7 @@ namespace DungeonRunners.Gameplay
                     spawnedCount++;
                 }
             }
-            Debug.LogError($"[ENCOUNTER-OBJECT] gen entity={encounter.EntityId} instance='{instanceKey}' group='{encounter.GroupKey}' centerF32=({encounter.CenterFixedX},{encounter.CenterFixedY}) bboxF32=({encounter.MinFixedX},{encounter.MinFixedY})-({encounter.MaxFixedX},{encounter.MaxFixedY}) choice={encounter.ChoiceIndex} spawned={spawnedCount} scanRadiusF32={encounter.ScanRadiusF32} sourceFunction=EncounterObject::update+GenerateObjectFromTable");
+            Debug.LogError($"[ENCOUNTER-OBJECT] gen entity={encounter.EntityId} instance='{instanceKey}' group='{encounter.GroupKey}' centerF32=({encounter.CenterFixedX},{encounter.CenterFixedY}) choice={encounter.ChoiceIndex} spawned={spawnedCount} scanRadiusF32={EncounterScanRadiusF32} sourceFunction=EncounterObject::update+GenerateObjectFromTable");
             return spawnedMonsters;
         }
 

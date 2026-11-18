@@ -96,7 +96,9 @@ public partial class CombatRuntime
             if (rng == null)
                 return;
             WanderSimulator.Instance.TickEntity(monster.EntityId, rng);
-            if (!monster.AggroTriggered)
+            if (monster.AggroTriggered)
+                PreserveMonsterWanderMoverState(monster);
+            else
                 ApplyMonsterWanderClientVisiblePosition(monster, "Wander::update-behavior");
         }
 
@@ -739,18 +741,36 @@ public partial class CombatRuntime
             if (!MonsterUsesProjectileWeapon(monster) || target == null || !target.HasUnitState)
                 return false;
 
-            TryGetMonsterClientVisiblePositionFixed(monster, target.EntityId, out int startFixedX, out int startFixedY);
-            ResolveMonsterActionTargetPositionFixed(target, out int targetFixedX, out int targetFixedY, out _);
-            int pathDistanceF32 = UnitMover.IntSqrt(
-                (long)(targetFixedX - startFixedX) * (targetFixedX - startFixedX)
-                + (long)(targetFixedY - startFixedY) * (targetFixedY - startFixedY));
-            int weaponRangeF32 = monster.WeaponRangeF32 > 0 ? monster.WeaponRangeF32 : Math.Max(0, ResolveMonsterEffectiveAttackRangeFixed(monster));
-            int flightDistanceF32 = weaponRangeF32 > 0 ? Math.Min(pathDistanceF32, weaponRangeF32) : pathDistanceF32;
+            TryPeekMonsterClientVisiblePositionFixed(monster, target.EntityId, out int sourceX, out int sourceY, out int sourceZ);
+            int targetX = monster.AttackCommitTargetFixedX;
+            int targetY = monster.AttackCommitTargetFixedY;
+            if (!monster.AttackCommitTargetFixedInit)
+                ResolveMonsterActionTargetPositionFixed(target, out targetX, out targetY, out _);
+            int sizePercent = monster.SizeModPercent + monster.GetActiveAttributeModifierValue("SIZEMOD");
+            int scaleFixed = (sizePercent << 8) / 100;
+            int offsetX = (int)(((long)monster.WeaponProjectileSourceOffsetX * scaleFixed) >> 8);
+            int offsetY = (int)(((long)monster.WeaponProjectileSourceOffsetY * scaleFixed) >> 8);
+            int heading = -(monster.HeadingFixed >> 8);
+            int sideHeading = heading - 90;
+            sourceX += (int)(((long)UnitMover.ZRotateSinFixed(heading) * offsetY) >> 8)
+                + (int)(((long)UnitMover.ZRotateSinFixed(sideHeading) * offsetX) >> 8);
+            sourceY += (int)(((long)UnitMover.ZRotateCosFixed(heading) * offsetY) >> 8)
+                + (int)(((long)UnitMover.ZRotateCosFixed(sideHeading) * offsetX) >> 8);
+            sourceZ += monster.WeaponProjectileSourceOffsetZ;
+
+            PathMap.TryBuildNativeRayDirectionFixed(targetX - sourceX, targetY - sourceY, out int directionX, out int directionY, out _);
+            int actorRadius = ResolveUnitBehaviorRadius130F32(monster);
+            int startX = sourceX + (int)(((long)directionX * actorRadius) >> 8);
+            int startY = sourceY + (int)(((long)directionY * actorRadius) >> 8);
             int speedF32 = monster.WeaponProjectileSpeedF32;
+            int stepF32 = WeaponUseRuntime.ProjectileStepDistanceF32(speedF32);
+            string mapKey = ResolveMonsterPathMapKey(monster);
+            PathMap map = string.IsNullOrWhiteSpace(mapKey) ? null : PathMapCatalog.Instance.GetPathMap(mapKey);
+            int groundOffsetZ = map != null && map.TryGetHeightAtFixed(startX, startY, out int groundZ)
+                ? sourceZ - groundZ
+                : 0;
             int fireTick = (int)_combatTick;
-            int flightTicks = WeaponUseRuntime.ProjectileFlightTicksFixed32(flightDistanceF32, speedF32);
-            int firstCollisionTick = fireTick + 1;
-            int dueTick = Math.Max(firstCollisionTick, fireTick + flightTicks);
+
             var pending = new PendingMonsterProjectileImpact
             {
                 Sequence = ++_nextMonsterProjectileSequence,
@@ -761,15 +781,26 @@ public partial class CombatRuntime
                 ZoneName = monster.ZoneName,
                 Marker = marker,
                 Source = source,
-                DistF32 = Math.Max(0, distF32),
+                DistF32 = distF32,
                 FireTick = fireTick,
-                FlightTicks = flightTicks,
-                DueTick = dueTick
+                LastUpdateTick = fireTick,
+                StartFixedX = startX,
+                StartFixedY = startY,
+                StartFixedZ = sourceZ,
+                CurrentFixedX = startX,
+                CurrentFixedY = startY,
+                CurrentFixedZ = sourceZ,
+                VelocityFixedX = (int)(((long)directionX * stepF32) >> 8),
+                VelocityFixedY = (int)(((long)directionY * stepF32) >> 8),
+                ProjectileSizeF32 = monster.WeaponProjectileSizeF32,
+                GroundOffsetFixedZ = groundOffsetZ,
+                MaxLifetimeTicks = WeaponUseRuntime.ProjectileDescriptorLifetimeTicks(monster.WeaponRangeF32, speedF32)
             };
             _pendingMonsterProjectiles.Add(pending);
             RegisterClientSubEntity(ClientSubEntityKind.MonsterProjectile, pending.Sequence, pending.InstanceKey, RemoveMonsterProjectileRuntime);
 
-            Debug.LogError($"[MON-PROJECTILE] {monster.Name}#{monster.EntityId}->{target.Name} schedule seq={pending.Sequence} marker={marker} source={source} fireTick={fireTick} firstCollisionTick={firstCollisionTick} flightTicks={flightTicks} dueTick={dueTick} distF32={distF32} pathDistF32={pathDistanceF32} flightDistF32={flightDistanceF32} speedF32={monster.WeaponProjectileSpeedF32} sizeF32={monster.WeaponProjectileSizeF32} rangeF32={weaponRangeF32} sourceFunction=RangedWeapon::doHit@0x00595DD0->Projectile::init@0x005934D0 commitAtImpact=Projectile::doImpact@0x00594430->Weapon::applyDamage@0x00597E50");
+            if (ServerDiagnostics.IsEnabled("verboseProjectileLogging"))
+                Debug.LogError($"[MON-PROJECTILE] seq={pending.Sequence} monster={monster.EntityId} target={target.EntityId} fireTick={fireTick} positionFixed=({startX},{startY},{sourceZ}) velocityFixed=({pending.VelocityFixedX},{pending.VelocityFixedY}) lifetime={pending.MaxLifetimeTicks} size={pending.ProjectileSizeF32}");
             return true;
         }
 
@@ -937,21 +968,8 @@ public partial class CombatRuntime
                     effect.DurationTicks, effect.RemoveOnDeath, effect.StackRule, powerLevel,
                     monster.EntityId, effect.SkillPath, effect.EffectPath);
             }
-            string modifierKey = BuildPlayerRuntimeModifierKey(target.EntityId, monster.EntityId, effect.ModifierPath, effect.StackRule, CLIENT_RUNTIME_MODIFIER_SOURCE_IS_SELF);
-            bool replaceModifier = _playerModifierNetworkIds.ContainsKey(modifierKey);
-            bool stackAccepted = target.PlayerState.ShouldAcceptAttributeModifier(modifierKey, effect.ModifierPath, effect.StackRule, powerLevel, effect.DurationTicks);
-            uint modifierId = 0;
-            if (stackAccepted && !TryAllocatePlayerModifierNetworkId(modifierKey, true, out modifierId))
-                return true;
+            string modifierKey = BuildPlayerRuntimeModifierKey(target.EntityId, monster.EntityId, effect.ModifierPath, effect.StackRule, sourceIsSelf: 0);
             CommitMonsterPrimarySkillUse(monster, $"{marker ?? "MON-SKILL"}:ActiveSkill::use@0x00538DD0");
-            if (!stackAccepted)
-            {
-                RaisePlayerModifierAdd(monster, target, modifierKey, effect.ModifierPath, 1, powerLevel, effect.DurationTicks, CLIENT_RUNTIME_MODIFIER_SOURCE_IS_SELF, replaceModifier, effect.SkillPath, effect.EffectPath, source ?? marker ?? "unknown", "SpellModEffect::doEffect@0x00554460 Modifiers::processAddModifier@0x00502280", false);
-                uint rejectedHP = target.CurrentHPWire;
-                Debug.LogError($"[PLAYER-MODIFIER-STACK] result=reject target={target.Name}#{target.EntityId} source={monster.Name}#{monster.EntityId} skill={effect.SkillPath} modifier={effect.ModifierPath} stack={effect.StackRule ?? "UNKNOWN"} key={modifierKey} incomingPower={powerLevel} incomingDuration={effect.DurationTicks} sourceIsSelf={CLIENT_RUNTIME_MODIFIER_SOURCE_IS_SELF} sourceFunction=Modifiers::addModifierLocal@0x00501770");
-                Debug.LogError($"[SPELL-MOD] skill={effect.SkillPath} effect={effect.EffectPath} modifier={effect.ModifierPath} attr=HIT_POINT_REGEN_BONUS value={effect.HitPointRegenBonus} durationF32={effect.DurationF32} durationTicks={effect.DurationTicks} applied=False hp={beforeHP}->{rejectedHP}/{target.MaxHPWire} source={source ?? marker ?? "unknown"} sourceFunction=SpellModEffect::doEffect@0x00554460 chanceDraw=false stack={effect.StackRule ?? ""} stackAccepted=False");
-                return true;
-            }
             bool applied = target.PlayerState.ApplyHitPointRegenBonusModifier(
                 effect.ModifierPath,
                 effect.HitPointRegenBonus,
@@ -965,14 +983,10 @@ public partial class CombatRuntime
                 powerLevel,
                 effect.StackRule,
                 level: 1,
-                sourceIsSelf: CLIENT_RUNTIME_MODIFIER_SOURCE_IS_SELF);
+                sourceIsSelf: 0);
             uint afterHP = target.CurrentHPWire;
             hpShifted = afterHP != beforeHP;
-            if (applied)
-                RaisePlayerModifierAddWithId(monster, target, modifierKey, effect.ModifierPath, modifierId, 1, powerLevel, effect.DurationTicks, CLIENT_RUNTIME_MODIFIER_SOURCE_IS_SELF, replaceModifier, effect.SkillPath, effect.EffectPath, source ?? marker ?? "unknown", "SpellModEffect::doEffect@0x00554460 Modifiers::processAddModifier@0x00502280");
-            else
-                ReleasePlayerModifierNetworkId(modifierKey, modifierId);
-            Debug.LogError($"[SPELL-MOD] skill={effect.SkillPath} effect={effect.EffectPath} modifier={effect.ModifierPath} attr=HIT_POINT_REGEN_BONUS value={effect.HitPointRegenBonus} durationF32={effect.DurationF32} durationTicks={effect.DurationTicks} power={powerLevel} applied={applied} hp={beforeHP}->{afterHP}/{target.MaxHPWire} source={source ?? marker ?? "unknown"} sourceFunction=SpellModEffect::doEffect@0x00554460 chanceDraw=false stack={effect.StackRule ?? ""} stackAccepted=True");
+            Debug.LogError($"[SPELL-MOD] skill={effect.SkillPath} effect={effect.EffectPath} modifier={effect.ModifierPath} attr=HIT_POINT_REGEN_BONUS value={effect.HitPointRegenBonus} durationF32={effect.DurationF32} durationTicks={effect.DurationTicks} power={powerLevel} applied={applied} hp={beforeHP}->{afterHP}/{target.MaxHPWire} source={source ?? marker ?? "unknown"} sourceFunction=SpellModEffect::doEffect@0x00554460 chanceDraw=false stack={effect.StackRule ?? ""}");
             return true;
         }
 

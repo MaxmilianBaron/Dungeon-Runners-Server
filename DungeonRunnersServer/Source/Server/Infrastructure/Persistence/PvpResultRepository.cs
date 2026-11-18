@@ -21,6 +21,11 @@ namespace DungeonRunners.Database
         public int RatingBefore;
         public int RatingAfter;
         public int PersistedRatingBefore;
+        public byte RatingBeforeFraction;
+        public byte RatingAfterFraction;
+        public byte PersistedRatingBeforeFraction;
+        public int? RatingOutcomePercentFixed32;
+        public int ResultContractVersion;
         public bool ApplyRating;
         public int WinsBefore;
         public int WinsDelta;
@@ -100,13 +105,15 @@ namespace DungeonRunners.Database
                            rating_before, rating_after, persisted_rating_before, apply_rating,
                            wins_before, wins_delta, reward_gc_class, reward_count, reward_width,
                            reward_height, reward_rarity, return_zone, return_zone_id,
-                           return_pos_fixed_x, return_pos_fixed_y, return_pos_fixed_z)
+                           return_pos_fixed_x, return_pos_fixed_y, return_pos_fixed_z,
+                           rating_before_fraction, rating_after_fraction, persisted_rating_before_fraction, rating_outcome_percent_fixed32, result_contract_version)
                           VALUES
                           (@resultId, @participantOrder, @characterId, @login, @isWinner, @isRanked,
                            @ratingBefore, @ratingAfter, @persistedRatingBefore, @applyRating,
                            @winsBefore, @winsDelta, @rewardGcClass, @rewardCount, @rewardWidth,
                            @rewardHeight, @rewardRarity, @returnZone, @returnZoneId,
-                           @returnPosFixedX, @returnPosFixedY, @returnPosFixedZ)",
+                           @returnPosFixedX, @returnPosFixedY, @returnPosFixedZ,
+                           @ratingBeforeFraction, @ratingAfterFraction, @persistedRatingBeforeFraction, @ratingOutcome, @resultContractVersion)",
                         ("@resultId", result.ResultId),
                         ("@participantOrder", participant.ParticipantOrder),
                         ("@characterId", (int)participant.CharacterId),
@@ -116,6 +123,11 @@ namespace DungeonRunners.Database
                         ("@ratingBefore", participant.RatingBefore),
                         ("@ratingAfter", participant.RatingAfter),
                         ("@persistedRatingBefore", participant.PersistedRatingBefore),
+                        ("@ratingBeforeFraction", participant.RatingBeforeFraction),
+                        ("@ratingAfterFraction", participant.RatingAfterFraction),
+                        ("@persistedRatingBeforeFraction", participant.PersistedRatingBeforeFraction),
+                        ("@ratingOutcome", (object)participant.RatingOutcomePercentFixed32 ?? DBNull.Value),
+                        ("@resultContractVersion", participant.ResultContractVersion),
                         ("@applyRating", participant.ApplyRating ? 1 : 0),
                         ("@winsBefore", participant.WinsBefore),
                         ("@winsDelta", participant.WinsDelta),
@@ -164,7 +176,8 @@ namespace DungeonRunners.Database
                     p.return_zone_id, p.return_pos_fixed_x, p.return_pos_fixed_y, p.return_pos_fixed_z,
                     CASE WHEN p.applied_at IS NULL THEN 0 ELSE 1 END,
                     CASE WHEN p.return_completed_at IS NULL THEN 0 ELSE 1 END,
-                    p.pending_grant_id
+                    p.pending_grant_id, p.rating_before_fraction, p.rating_after_fraction,
+                    p.persisted_rating_before_fraction, p.rating_outcome_percent_fixed32, p.result_contract_version
                     FROM pvp_participant_results p
                     JOIN pvp_match_results m ON m.result_id=p.result_id
                     WHERE (p.applied_at IS NULL OR p.return_completed_at IS NULL)" + filter +
@@ -360,7 +373,8 @@ namespace DungeonRunners.Database
                 p.return_zone_id, p.return_pos_fixed_x, p.return_pos_fixed_y, p.return_pos_fixed_z,
                 CASE WHEN p.applied_at IS NULL THEN 0 ELSE 1 END,
                 CASE WHEN p.return_completed_at IS NULL THEN 0 ELSE 1 END,
-                p.pending_grant_id
+                p.pending_grant_id, p.rating_before_fraction, p.rating_after_fraction,
+                    p.persisted_rating_before_fraction, p.rating_outcome_percent_fixed32, p.result_contract_version
                 FROM pvp_participant_results p
                 JOIN pvp_match_results m ON m.result_id=p.result_id
                 WHERE p.result_id=@resultId AND p.participant_order=@participantOrder";
@@ -381,24 +395,45 @@ namespace DungeonRunners.Database
                 || participant.ParticipantOrder < 0 || participant.ParticipantOrder > byte.MaxValue
                 || participant.CharacterId == 0 || participant.CharacterId > int.MaxValue
                 || string.IsNullOrWhiteSpace(participant.LoginName) || participant.LoginName.Length > 256
-                || participant.RatingBefore < 0 || participant.RatingBefore > 3000
-                || participant.RatingAfter < 0 || participant.RatingAfter > 3000
-                || participant.PersistedRatingBefore < 0 || participant.PersistedRatingBefore > 3000
+                || participant.RatingBefore < SavedCharacter.MinPvpRating || participant.RatingBefore > SavedCharacter.MaxPvpRating
+                || participant.RatingAfter < SavedCharacter.MinPvpRating || participant.RatingAfter > SavedCharacter.MaxPvpRating
+                || participant.PersistedRatingBefore < SavedCharacter.MinPvpRating || participant.PersistedRatingBefore > SavedCharacter.MaxPvpRating
                 || participant.WinsBefore < 0 || participant.WinsDelta < 0 || participant.WinsDelta > 1
                 || participant.WinsBefore > int.MaxValue - participant.WinsDelta
                 || string.IsNullOrWhiteSpace(participant.ReturnZone) || participant.ReturnZone.Length > 1024)
                 return false;
-            if (participant.IsWinner != (participant.WinsDelta == 1))
+            if (participant.ResultContractVersion < 0 || participant.ResultContractVersion > 1)
                 return false;
-            if (participant.ApplyRating && (!participant.IsRanked || !participant.HasWinner))
+            if (participant.ResultContractVersion == 0)
+            {
+                if (participant.RatingOutcomePercentFixed32.HasValue
+                    || participant.IsWinner != (participant.WinsDelta == 1))
+                    return false;
+            }
+            else if (participant.ApplyRating != participant.RatingOutcomePercentFixed32.HasValue
+                || participant.WinsDelta != (participant.IsRanked
+                    && (participant.IsWinner || participant.RatingOutcomePercentFixed32 == 0x3200) ? 1 : 0))
                 return false;
-            if (!participant.ApplyRating && participant.RatingAfter != participant.RatingBefore)
+            if (participant.ApplyRating && (!participant.IsRanked
+                || (!participant.HasWinner && !participant.RatingOutcomePercentFixed32.HasValue)))
+                return false;
+            if (participant.RatingOutcomePercentFixed32.HasValue)
+            {
+                int outcome = participant.RatingOutcomePercentFixed32.Value;
+                if (!participant.ApplyRating || (outcome != 0 && outcome != 0x3200 && outcome != 0x6400)
+                    || participant.IsWinner != (outcome == 0x6400)
+                    || (participant.HasWinner && outcome == 0x3200))
+                    return false;
+            }
+            if (!participant.ApplyRating && (participant.RatingAfter != participant.RatingBefore
+                || participant.RatingAfterFraction != participant.RatingBeforeFraction))
                 return false;
             if (participant.RewardCount == 0)
                 return string.IsNullOrEmpty(participant.RewardGcClass)
                     && participant.RewardWidth == 0 && participant.RewardHeight == 0
                     && participant.RewardRarity == -1;
-            return participant.HasWinner && participant.IsRanked
+            return (participant.HasWinner || (participant.ResultContractVersion == 1
+                && participant.RatingOutcomePercentFixed32 == 0x3200)) && participant.IsRanked
                 && !string.IsNullOrWhiteSpace(participant.RewardGcClass)
                 && participant.RewardGcClass.Length <= 1024
                 && participant.RewardCount > 0 && participant.RewardCount <= byte.MaxValue
@@ -484,7 +519,8 @@ namespace DungeonRunners.Database
                     p.return_zone_id, p.return_pos_fixed_x, p.return_pos_fixed_y, p.return_pos_fixed_z,
                     CASE WHEN p.applied_at IS NULL THEN 0 ELSE 1 END,
                     CASE WHEN p.return_completed_at IS NULL THEN 0 ELSE 1 END,
-                    p.pending_grant_id
+                    p.pending_grant_id, p.rating_before_fraction, p.rating_after_fraction,
+                    p.persisted_rating_before_fraction, p.rating_outcome_percent_fixed32, p.result_contract_version
                     FROM pvp_participant_results p
                     JOIN pvp_match_results m ON m.result_id=p.result_id
                     WHERE p.result_id=@resultId ORDER BY p.participant_order";
@@ -532,7 +568,12 @@ namespace DungeonRunners.Database
                 ReturnPosFixedZ = reader.GetInt32(24),
                 Applied = reader.GetInt32(25) != 0,
                 ReturnCompleted = reader.GetInt32(26) != 0,
-                PendingGrantId = reader.GetInt64(27)
+                PendingGrantId = reader.GetInt64(27),
+                RatingBeforeFraction = checked((byte)reader.GetInt32(28)),
+                RatingAfterFraction = checked((byte)reader.GetInt32(29)),
+                PersistedRatingBeforeFraction = checked((byte)reader.GetInt32(30)),
+                RatingOutcomePercentFixed32 = reader.IsDBNull(31) ? null : reader.GetInt32(31),
+                ResultContractVersion = reader.GetInt32(32)
             };
         }
 
@@ -550,6 +591,11 @@ namespace DungeonRunners.Database
                 && left.RatingBefore == right.RatingBefore
                 && left.RatingAfter == right.RatingAfter
                 && left.PersistedRatingBefore == right.PersistedRatingBefore
+                && left.RatingBeforeFraction == right.RatingBeforeFraction
+                && left.RatingAfterFraction == right.RatingAfterFraction
+                && left.PersistedRatingBeforeFraction == right.PersistedRatingBeforeFraction
+                && left.RatingOutcomePercentFixed32 == right.RatingOutcomePercentFixed32
+                && left.ResultContractVersion == right.ResultContractVersion
                 && left.ApplyRating == right.ApplyRating
                 && left.WinsBefore == right.WinsBefore
                 && left.WinsDelta == right.WinsDelta

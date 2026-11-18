@@ -403,6 +403,9 @@ namespace DungeonRunners.Combat
             spell.WeaponEffectArcMaxF32 = node.HasProperty("ArcMax") ? node.GetFixed32("ArcMax", 0) : spell.WeaponEffectArcMaxF32;
             spell.WeaponEffectArcIncF32 = node.GetFixed32("ArcInc", spell.WeaponEffectArcIncF32);
             spell.HasImmediateWeaponDamageEffect = true;
+            spell.NumTargetsMinF32 = 0x100;
+            spell.NumTargetsMaxF32 = 0x100;
+            spell.NumTargetsIncF32 = 0;
             ParseNumTargets(spell, node);
             if (spell.NumTargetsMaxF32 > 0x100 || spell.NumTargetsMinF32 > 0x100)
                 spell.IsAoE = true;
@@ -1107,7 +1110,7 @@ namespace DungeonRunners.Combat
             }
         }
 
-        private static bool TryParseSourceOffsetFixed(GCNode animation, out int fixedX, out int fixedY, out int fixedZ)
+        internal static bool TryParseSourceOffsetFixed(GCNode animation, out int fixedX, out int fixedY, out int fixedZ)
         {
             fixedX = 0;
             fixedY = 0;
@@ -2084,6 +2087,9 @@ namespace DungeonRunners.Combat
             int projectileCount = 0;
             int burstCount = 0;
             int teleportCount = 0;
+            int referencedKnockDownCount = 0;
+            int referencedEffectModifierCount = 0;
+            string weaponReferencedEffectId = null;
             int directDamageOrder = -1;
             int weaponDamageOrder = -1;
             int knockDownOrder = -1;
@@ -2096,8 +2102,23 @@ namespace DungeonRunners.Combat
                 string family = node?.Family ?? "Unknown";
                 if (HasUnmaterializedPlayerReferencedEffect(node))
                 {
-                    reason = $"unsupported-player-position-referenced-effect-graph:{family}:{node.ReferencedEffectId}";
-                    return false;
+                    if (!string.Equals(family, "SpellWeaponDamageEffect", StringComparison.Ordinal)
+                        || node.ChanceF32 != 0x6400)
+                    {
+                        reason = $"unsupported-player-position-referenced-effect-graph:{family}:{node.ReferencedEffectId}";
+                        return false;
+                    }
+                    if (!TryValidatePlayerWeaponReferencedEffectRuntime(
+                            spell,
+                            node,
+                            out int nodeKnockDownCount,
+                            out int nodeEffectModifierCount,
+                            out reason,
+                            allowSourceStacking: true))
+                        return false;
+                    referencedKnockDownCount += nodeKnockDownCount;
+                    referencedEffectModifierCount += nodeEffectModifierCount;
+                    weaponReferencedEffectId = node.ReferencedEffectId;
                 }
                 switch (family)
                 {
@@ -2142,14 +2163,37 @@ namespace DungeonRunners.Combat
                 reason = $"unsupported-player-position-effect-count:direct={directDamageCount},weapon={weaponDamageCount},knockdown={knockDownCount},projectile={projectileCount},burst={burstCount},teleport={teleportCount}";
                 return false;
             }
-            if (spell.ModifierEffects?.Count > 0 || spell.HasDeferredProjectileModifierDamage)
+            if (referencedKnockDownCount != 0
+                || referencedEffectModifierCount != 0
+                    && (referencedEffectModifierCount != 1
+                        || directDamageCount != 0
+                        || weaponDamageCount != 1
+                        || knockDownCount != 0
+                        || projectileCount != 0
+                        || burstCount != 0
+                        || teleportCount != 0
+                        || spell.AttackType != AttackType.RANGED
+                        || spell.NumTargetsMinF32 != 0x100
+                        || spell.NumTargetsMaxF32 != 0x100
+                        || spell.NumTargetsIncF32 != 0
+                        || spell.WeaponEffectArcMinF32 != 0
+                        || spell.WeaponEffectArcMaxF32 != 0
+                        || spell.WeaponEffectArcIncF32 != 0))
+            {
+                reason = "unsupported-player-position-referenced-effect-modifier-shape";
+                return false;
+            }
+            if ((spell.ModifierEffects?.Count > 0 || spell.HasDeferredProjectileModifierDamage)
+                && referencedEffectModifierCount != 1)
             {
                 reason = "unsupported-player-position-modifier-order";
                 return false;
             }
-            if (!string.IsNullOrWhiteSpace(spell.ProjectileEffectId)
-                || !string.IsNullOrWhiteSpace(spell.ProjectileModifierId)
-                || !string.IsNullOrWhiteSpace(spell.ProjectileModifierEffectId))
+            if (referencedEffectModifierCount == 1
+                ? !string.Equals(spell.ProjectileEffectId, weaponReferencedEffectId, StringComparison.OrdinalIgnoreCase)
+                : !string.IsNullOrWhiteSpace(spell.ProjectileEffectId)
+                    || !string.IsNullOrWhiteSpace(spell.ProjectileModifierId)
+                    || !string.IsNullOrWhiteSpace(spell.ProjectileModifierEffectId))
             {
                 reason = "unsupported-player-position-referenced-effect-graph";
                 return false;
@@ -2322,7 +2366,8 @@ namespace DungeonRunners.Combat
             SpellEffectNodeData weaponNode,
             out int knockDownCount,
             out int effectModifierCount,
-            out string reason)
+            out string reason,
+            bool allowSourceStacking = false)
         {
             knockDownCount = 0;
             effectModifierCount = 0;
@@ -2367,7 +2412,7 @@ namespace DungeonRunners.Combat
                         break;
                     case "SpellModEffect":
                         effectModifierCount++;
-                        if (!TryValidatePlayerWeaponReferencedEffectModifierRuntime(spell, node, out reason))
+                        if (!TryValidatePlayerWeaponReferencedEffectModifierRuntime(spell, node, out reason, allowSourceStacking))
                             return false;
                         break;
                     default:
@@ -2388,7 +2433,8 @@ namespace DungeonRunners.Combat
         private static bool TryValidatePlayerWeaponReferencedEffectModifierRuntime(
             SpellData spell,
             SpellEffectNodeData modifierNode,
-            out string reason)
+            out string reason,
+            bool allowSourceStacking = false)
         {
             reason = null;
             if (spell == null
@@ -2414,12 +2460,17 @@ namespace DungeonRunners.Combat
                 reason = "unsupported-player-pve-referenced-effect-modifier-provenance";
                 return false;
             }
+            long frequencyTicks = ((long)modifier.FrequencyF32 * 30L) >> 8;
+            long durationTicks = ((long)modifier.DurationF32 * 30L + 0x100L) >> 8;
             if (!string.Equals(modifier.ModifierFamily, "EffectMod", StringComparison.Ordinal)
                 || modifier.EffectOrder != -1
                 || modifier.DurationF32 <= 0
                 || modifier.DurationIncF32 != 0
                 || modifier.FrequencyF32 <= 0
                 || !string.Equals(modifier.StackRule, "UNIQUEBYTYPE", StringComparison.OrdinalIgnoreCase)
+                    && !(allowSourceStacking && string.Equals(modifier.StackRule, "UNIQUEBYSOURCE", StringComparison.OrdinalIgnoreCase))
+                || allowSourceStacking
+                    && (frequencyTicks <= 0 || frequencyTicks > byte.MaxValue || durationTicks > ushort.MaxValue)
                 || !modifier.RemoveOnDeath
                 || modifier.TerminateWhenHitChance != 0
                 || modifier.Attributes == null
