@@ -1,0 +1,10 @@
+* text=auto
+*.cs text eol=lf
+*.csproj text eol=lf
+*.md text eol=lf
+*.cfg text eol=lf
+*.cmd text eol=crlf
+*.dll binary
+*.exe binary
+*.ico binary
+*.zip binary

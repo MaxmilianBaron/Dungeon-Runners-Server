@@ -1,0 +1,2 @@
+# Existing diagnostics reviewed as migration debt. New fingerprints remain build errors.
+# Do not refresh this file to hide a new violation; cite native evidence first.
